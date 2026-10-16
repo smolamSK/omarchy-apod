@@ -28,6 +28,13 @@ BarWidget {
   readonly property var colors: status.palette && status.palette.colors ? status.palette.colors : ({})
 
   property bool popupOpen: false
+  // open/close/opened let `omarchy-shell shell summon|hide|toggle io.github.smolamsk.apod`
+  // drive the popup, e.g. from a keybinding.
+  readonly property bool opened: popupOpen
+  function open() {
+    popupOpen = true
+    if (apod) apod.refresh()
+  }
   function close() { popupOpen = false }
 
   implicitWidth: button.implicitWidth
