@@ -133,6 +133,96 @@ if show latest && echo latest >"$DATA/mode"; then exit 9; fi
 ''')
         self.assertFalse((self.data / "mode").exists())
 
+    # ------------------------------------------------------------ picking a picture
+
+    def candidates_bash(self, entries):
+        """Bash that makes `candidates` yield ENTRIES, with sizes from SIZES (date -> px) and
+        each download logged. Pictures are already in the format resolve accepts."""
+        self.env["CANDIDATES"] = "\n".join(json.dumps(e) for e in entries)
+        return '''
+candidates() { printf '%s\\n' "$CANDIDATES"; }
+probe_size() { local d=${1##*/}; d=${d%.jpg}; echo "probe $d" >>"$DATA/events"; jq -r --arg d "$d" '.[$d] // empty' <<<"$SIZES"; }
+download() { local d; d=$(jq -r .date <<<"$1"); echo "download $d" >>"$DATA/events"; echo "$DATA/orig-$d.jpg"; }
+set_entry() { echo "set $(jq -r .date <<<"$1")" >>"$DATA/events"; }
+'''
+
+    @staticmethod
+    def picture(date, kind="image"):
+        return {"date": date, "title": date, "media_type": kind, "hdurl": f"https://apod.nasa.gov/{date}.jpg"}
+
+    def test_random_skips_small_pictures_without_downloading_them(self):
+        self.env["SIZES"] = json.dumps({"d1": 1000, "d2": 1500, "d3": 3000})
+        bash = self.candidates_bash([self.picture("d1"), self.picture("v", "video"),
+                                     self.picture("d2"), self.picture("d3")])
+        result = self.run_bash(bash + 'show random')
+        self.assertEqual(self.events(), ["probe d1", "probe d2", "probe d3", "download d3", "set d3"])
+        self.assertIn("d1 is only 1000px; trying another", result.stderr)
+        self.assertIn("v is a video; trying another", result.stderr)
+
+    def test_random_settles_for_the_largest_when_all_are_small(self):
+        self.env["SIZES"] = json.dumps({f"d{i}": 1000 + i for i in range(40)} | {"d7": 1800})
+        bash = self.candidates_bash([self.picture(f"d{i}") for i in range(40)])
+        result = self.run_bash(bash + 'MAX_TRIES=10; show random')
+        events = self.events()
+        self.assertEqual(sum(e.startswith("probe") for e in events), 10)
+        self.assertEqual(events[-2:], ["download d7", "set d7"])
+        self.assertIn("using the largest (1800px)", result.stderr)
+
+    def test_unknown_size_is_checked_after_download(self):
+        self.env["SIZES"] = "{}"
+        bash = self.candidates_bash([self.picture("d1")])
+        make_image(self.data / "orig-d1.jpg", "-size", "30x20", "xc:red")
+        result = self.run_bash(bash + 'show random')
+        # Too small, and the only one: used anyway, as the largest found.
+        self.assertIn("d1 is only 30px", result.stderr)
+        self.assertEqual(self.events()[-1], "set d1")
+
+    def test_latest_passes_over_a_video_and_notes_it(self):
+        self.env["SIZES"] = "{}"
+        bash = self.candidates_bash([self.picture("2026-10-02", "video"), self.picture("2026-10-01")])
+        self.run_bash(bash + 'show latest')
+        self.assertEqual(self.events(), ["download 2026-10-01", "set 2026-10-01"])
+        video = json.loads((self.data / "video.json").read_text())
+        self.assertEqual(video["date"], "2026-10-02")
+        # The widget is told while that picture is the one showing, in latest mode only.
+        (self.data / "meta.json").write_text(json.dumps(ENTRY))
+        self.assertEqual(json.loads(self.run_cli("status").stdout)["video"]["date"], "2026-10-02")
+        (self.data / "mode").write_text("random")
+        self.assertIsNone(json.loads(self.run_cli("status").stdout)["video"])
+        # A photo on the newest day clears it.
+        (self.data / "events").unlink()
+        bash = self.candidates_bash([self.picture("2026-10-03")])
+        self.run_bash(bash + 'show latest')
+        self.assertFalse((self.data / "video.json").exists())
+
+    def test_video_day_needs_no_more_checks(self):
+        (self.data / "mode").write_text("latest")
+        self.run_bash('''
+echo "$DATA/orig-2000-01-01.jpg" >"$DATA/current"
+printf '{"date":"%s"}' "$(apod_today)" >"$DATA/video.json"
+show() { echo "show $1" >>"$DATA/events"; }
+cmd_update ""
+''')
+        self.assertEqual(self.events(), [])
+
+    def test_download_reports_progress_when_asked(self):
+        self.env["APOD_PROGRESS"] = "1"
+        result = self.run_bash('''
+curl() {
+    local out headers
+    while (( $# )); do case $1 in -o) out=$2; shift ;; -D) headers=$2; shift ;; esac; shift; done
+    printf 'HTTP/2 302\\r\\ncontent-length: 5\\r\\n\\r\\nHTTP/2 200\\r\\nContent-Length: 4000\\r\\n\\r\\n' >"$headers"
+    head -c 1000 /dev/zero >"$out"; sleep 0.7
+    magick -size 20x20 xc:blue "jpg:$out"; sleep 0.7
+}
+fetch https://apod.nasa.gov/x.jpg "$DATA/orig-x.jpg"
+''')
+        lines = [l for l in result.stderr.splitlines() if " progress " in l]
+        self.assertTrue(lines, result.stderr)
+        self.assertEqual(lines[0], "omarchy-apod: progress 1000 4000")
+        self.assertTrue((self.data / "orig-x.jpg").exists())
+        self.assertEqual(list(self.data.glob("*.headers")), [])
+
     # ------------------------------------------------------------ the theme
 
     def test_build_theme_keeps_exactly_one_background(self):
@@ -151,6 +241,17 @@ build_theme "$DATA/orig-2026-10-01.jpg" "$DATA/meta.json"
         self.assertTrue((self.theme / "preview.jpg").exists())
         self.assertEqual(json.loads((self.data / "palette.json").read_text())["mode"], "dark")
         self.assertEqual([p.name for p in self.data.glob("*.part")], [])
+
+    def test_small_pictures_are_not_enlarged_more_than_twice(self):
+        small = self.data / "orig-small.jpg"
+        make_image(small, "-size", "60x40", "xc:#204080")
+        result = self.run_bash(f'''
+render "{small}" 320 200 "$DATA/r.jpg"
+magick -ping "$DATA/r.jpg" -format '%w %h' info:
+''')
+        # Still the full screen, with the picture whole at 2x (120x80) over the blurred copy.
+        self.assertEqual(result.stdout.strip(), "320 200")
+        self.assertIn("fit)", result.stderr)
 
     def test_fit_change_rerenders_and_status_finds_new_cache_name(self):
         (self.data / "meta.json").write_text(json.dumps(ENTRY))
@@ -211,14 +312,15 @@ entries date=2026-10-01 2026-10-01
                 self.assertIn("trying the APOD website instead", result.stderr)
 
     def test_valid_video_and_empty_results_do_not_trigger_fallback(self):
-        for response in ["[]", json.dumps({**ENTRY, "media_type": "video"})]:
+        video = {**ENTRY, "media_type": "video"}
+        for response, out in [("[]", ""), (json.dumps(video), json.dumps(video, separators=(",", ":")) + "\n")]:
             with self.subTest(response=response):
                 self.env["API_RESPONSE"] = response
                 result = self.run_bash('''
 api() { printf '%s' "$API_RESPONSE"; }
 entries date=2026-10-01 2026-10-01
 ''')
-                self.assertEqual(result.stdout, "")
+                self.assertEqual(result.stdout, out)
                 self.assertEqual(result.stderr, "")
 
     def test_page_entry_reads_the_website(self):

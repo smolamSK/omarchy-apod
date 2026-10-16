@@ -29,17 +29,55 @@ Item {
   // The action in progress: "", "update", "latest", "random", "use" or "apply".
   property string busy: ""
   property string error: ""
+  // What the running action is doing now (its latest progress message), and its download.
+  property string stage: ""
+  property real downloaded: 0
+  property real downloadTotal: 0
+  // Every message of the running action, for reason().
+  property var messages: []
 
   property string pendingSettings: ""
 
-  // Progress lines the script writes to stderr. Anything else is a reason for failure.
-  readonly property var progress: /^(downloading |rendering |theme built|APOD theme applied|notified|no picture yet|settings saved|HD image unavailable|trying the APOD website instead$|.* is under \d+px, trying another$)/
+  // Progress messages the script writes to stderr. Anything else is a reason for failure.
+  readonly property var progress: /^(looking for a picture$|checking |downloading |fitting the picture|working out the theme|applying the theme$|theme built|APOD theme applied$|notified|no picture yet|settings saved$|HD image unavailable|trying the APOD website instead$|\S+ is a video; trying another$|\S+ is only \d+px; trying another$|no picture of \d+px or more found)/
 
-  // reason TEXT — the sentence to show for a failed run's stderr.
-  function reason(text) {
-    var lines = String(text || "").split("\n")
-      .filter(function(l) { return l.indexOf("omarchy-apod: ") === 0 })
-      .map(function(l) { return l.slice(14) })
+  function begin(action) {
+    root.busy = action
+    root.stage = ""
+    root.downloaded = 0
+    root.downloadTotal = 0
+    root.messages = []
+  }
+
+  // A stderr line of the running action: "progress DONE TOTAL" updates the download,
+  // other progress messages become the stage.
+  function readLine(line) {
+    if (line.indexOf("omarchy-apod: ") !== 0) return
+    var message = line.slice(14)
+    var bytes = /^progress (\d+) (\d+)$/.exec(message)
+    if (bytes) {
+      root.downloaded = Number(bytes[1])
+      root.downloadTotal = Number(bytes[2])
+      return
+    }
+    root.messages.push(message)
+    if (root.progress.test(message)) {
+      root.stage = message
+      root.downloaded = 0
+      root.downloadTotal = 0
+    }
+  }
+
+  function finish() {
+    root.busy = ""
+    root.stage = ""
+    root.downloaded = 0
+    root.downloadTotal = 0
+    root.refresh()
+  }
+
+  // reason MESSAGES — the sentence to show for a failed run.
+  function reason(lines) {
     // An API error that the website fallback dealt with is not the reason.
     var fallback = lines.lastIndexOf("trying the APOD website instead")
     var candidates = fallback >= 0 ? lines.slice(fallback + 1).concat(lines) : lines
@@ -51,15 +89,16 @@ Item {
   function run(action) {
     if (root.busy !== "" || ["latest", "random", "use", "apply"].indexOf(action) < 0) return false
     root.error = ""
-    root.busy = action
-    actionProc.command = ["timeout", "--kill-after=5s", "90s", root.script, action]
+    root.begin(action)
+    // Long enough for a big picture on a slow connection; the widget shows the progress.
+    actionProc.command = ["timeout", "--kill-after=5s", "5m", root.script, action]
     actionProc.running = true
     return true
   }
 
   function update() {
     if (root.busy !== "" || updater.running) return
-    root.busy = "update"
+    root.begin("update")
     updater.running = true
   }
 
@@ -84,12 +123,12 @@ Item {
 
   Process {
     id: actionProc
-    stderr: StdioCollector { id: actionErr; waitForEnd: true }
+    environment: ({ APOD_PROGRESS: "1" })
+    stderr: SplitParser { onRead: function(line) { root.readLine(line) } }
     onExited: function(code) {
       if (code === 124 || code === 137) root.error = "NASA took too long to answer; try again"
-      else if (code !== 0) root.error = root.reason(actionErr.text)
-      root.busy = ""
-      root.refresh()
+      else if (code !== 0) root.error = root.reason(root.messages)
+      root.finish()
     }
   }
 
@@ -97,12 +136,12 @@ Item {
     id: updater
     // Background runs may retry for a while when the network is down.
     command: ["timeout", "--kill-after=10s", "20m", root.script, "update"]
-    stderr: StdioCollector { id: updateErr; waitForEnd: true }
+    environment: ({ APOD_PROGRESS: "1" })
+    stderr: SplitParser { onRead: function(line) { root.readLine(line) } }
     onExited: function(code) {
       // Shown only until the next success; background failures are retried hourly.
-      root.error = code === 0 ? "" : root.reason(updateErr.text)
-      root.busy = ""
-      root.refresh()
+      root.error = code === 0 ? "" : root.reason(root.messages)
+      root.finish()
     }
   }
 
@@ -118,7 +157,9 @@ Item {
     }
     stderr: StdioCollector { id: configErr; waitForEnd: true }
     onExited: function(code) {
-      if (code !== 0) root.error = root.reason(configErr.text)
+      if (code !== 0) root.error = root.reason(String(configErr.text || "").split("\n")
+        .filter(function(l) { return l.indexOf("omarchy-apod: ") === 0 })
+        .map(function(l) { return l.slice(14) }))
       root.refresh()
       root.flushSettings()
     }

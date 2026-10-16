@@ -10,14 +10,15 @@ This is the Omarchy version of [kde-apod](https://github.com/smolamSK/kde-apod).
 
 ## Features
 
-- **Daily wallpaper.** NASA's new picture shortly after it is published, and at login if the computer was off. On days when APOD is a video, the most recent photo stays.
+- **Daily wallpaper.** NASA's new picture shortly after it is published, and at login if the computer was off. On days when APOD is a video, the most recent photo stays, and the widget links to the video.
 - **A theme from every picture.** The picture's strongest colours become the accent and the window-border gradient, and its dark sky tints the background. Terminal colours keep their meaning (red is still red) but lean towards the picture's own hues. Every text colour is checked against the background and adjusted until it is readable.
 - **Light or dark.** Bright pictures get a light theme, the rest (most of the sky) a dark one. You can also pick one.
-- **Fitted to your screen.** If the picture's shape is close to your monitor's, it is cropped to fill it. If the shapes are very different (a tall photo on a wide screen), the whole picture is shown over a blurred copy of itself.
+- **Fitted to your screen.** If the picture's shape is close to your monitor's, it is cropped to fill it. If the shapes are very different (a tall photo on a wide screen), the whole picture is shown over a blurred copy of itself. Small pictures are never enlarged more than twice; they too are shown whole over a blurred copy rather than blown up and blurry.
 - **Notification** with the title, credit and NASA's explanation when the picture changes.
 - **Bar widget** with the picture, its story, the theme's colours, and:
   - **Latest:** NASA's new picture every day.
-  - **Random:** a random picture from the archive every day. Click **Shuffle** for another one right away, or middle-click the bar icon.
+  - **Random:** a random picture from the archive every day. Click **Shuffle** for another one right away, or middle-click the bar icon. Many older APOD pictures are only about 1000 pixels wide, so Random reads each picture's size before downloading it and passes over those under 1920 pixels. If none of the 15 it looks at is that big, it uses the largest.
+  - While it works, the widget says what it is doing, with a progress bar for the download: some pictures are tens of megabytes.
   - **Use theme:** shown when you've switched to another theme; switches back to the APOD theme.
   - Click the picture to open its page on science.nasa.gov.
 

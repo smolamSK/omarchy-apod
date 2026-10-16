@@ -33,6 +33,9 @@ FIT_THRESHOLD=1.2         # aspect mismatch above which the picture is fitted ov
 KEEP_DAYS=7
 RANDOM_SINCE=2007-01-01   # random mode: pick from the archive since this date
 RANDOM_MIN_SIZE=1920      # random mode: skip pictures whose longer side is smaller
+MAX_TRIES=15              # random mode: pictures to look at before settling for the largest one
+MAX_UPSCALE=2             # never enlarge a picture more; smaller ones are shown whole over a blurred copy
+PROBE_BYTES=262144        # enough of a file to read the picture's size without downloading it
 CHECK_HOURS=3             # latest mode: look for a new picture at most this often
 RETRIES=10 RETRY_DELAY=30 RETRY_MAX=900   # patient in the background; the widget's commands give up sooner
 
@@ -118,7 +121,7 @@ api() {
 # instead of the real entry; such entries, and bare {"date": ...} stubs, need page_entry.
 NEEDS_PAGE='(.title == null or .title == "NASA Science" or (.url // "" | test("/wp-content/themes/")))'
 
-# entries QUERY DATE... — APOD API entries for QUERY, one per line, keeping still images
+# entries QUERY DATE... — APOD API entries for QUERY, one per line, keeping still images, videos
 # and entries that need page_entry; if the API fails, {"date": ...} stubs for DATE... instead.
 entries() {
     local query=$1 out parsed; shift
@@ -129,7 +132,7 @@ entries() {
             | if type == \"array\" then .[] else . end
             | if type == \"object\" and (.date | type == \"string\") then .
               else error(\"expected an APOD entry\") end
-            | select($NEEDS_PAGE or .media_type == \"image\")" <<<"$out" 2>/dev/null); then
+            | select($NEEDS_PAGE or .media_type == \"image\" or .media_type == \"video\")" <<<"$out" 2>/dev/null); then
             [[ -z $parsed ]] || printf '%s\n' "$parsed"
             return 0
         fi
@@ -172,14 +175,16 @@ page_entry() {
         | select(.title)' <<<"$html" | grep . || { log "no APOD entry for $date on the website"; return 1; }
 }
 
-# resolve ENTRY — the entry itself, or its page_entry when the API's copy is bad; fails unless a still image.
+# resolve ENTRY — the entry itself, or its page_entry when the API's copy is bad. Fails unless
+# it is a still image from NASA, or a video (which show only notes for the widget).
 resolve() {
     local entry=$1
     if jq -e "$NEEDS_PAGE" <<<"$entry" >/dev/null; then
         entry=$(page_entry "$(jq -r .date <<<"$entry")") || return 1
     fi
     # Only https from NASA's own hosts: the URL comes from a web page.
-    jq -e '.media_type == "image" and ((.hdurl // .url) | test("^https://([a-z0-9-]+\\.)*nasa\\.gov/"))' <<<"$entry" >/dev/null || return 1
+    jq -e '.media_type == "video" or
+           (.media_type == "image" and ((.hdurl // .url) | test("^https://([a-z0-9-]+\\.)*nasa\\.gov/")))' <<<"$entry" >/dev/null || return 1
     echo "$entry"
 }
 
@@ -217,12 +222,45 @@ orig_path() {
     echo "$DATA/orig-$(jq -r .date <<<"$1")${3:+-$3}.$ext"
 }
 
-# fetch URL FILE — download URL to FILE (a cached original), leaving nothing behind on failure.
+# content_length HEADERS — the size the server announced for the final response, or nothing.
+content_length() {
+    tr -d '\r' <"$1" 2>/dev/null | awk 'tolower($1) == "content-length:" { n = $2 } /^HTTP\// { n = "" } END { print n }'
+}
+
+# progress DONE TOTAL — download progress in bytes: a line for the widget (APOD_PROGRESS=1),
+# or a line that updates in place in a terminal.
+progress() {
+    local text
+    if [[ ${APOD_PROGRESS:-} == 1 ]]; then
+        log "progress $1 ${2:-0}"
+    elif [[ -t 2 ]]; then
+        text=$(awk -v d="$1" -v t="${2:-0}" 'BEGIN {
+            if (t > 0) printf "%.1f of %.1f MB (%d%%)", d / 1048576, t / 1048576, 100 * d / t
+            else printf "%.1f MB", d / 1048576 }')
+        printf '\r\033[Komarchy-apod:   %s' "$text" >&2
+    fi
+}
+
+# fetch URL FILE — download URL to FILE (a cached original), reporting progress and leaving
+# nothing behind on failure.
 fetch() {
-    local key
-    if curl -fsSL --proto '=https' --proto-redir '=https' --max-filesize 200M \
-            --connect-timeout "${CONNECT_MAX:-15}" --max-time "${DOWNLOAD_MAX:-300}" --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-max-time "$RETRY_MAX" \
-            -o "$2.part" "$1"; then
+    local key pid rc=0 size last=-1 total=''
+    rm -f "$2.part" "$2.headers"
+    curl -fsSL --proto '=https' --proto-redir '=https' --max-filesize 200M \
+        --connect-timeout "${CONNECT_MAX:-15}" --max-time "${DOWNLOAD_MAX:-300}" --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-max-time "$RETRY_MAX" \
+        -D "$2.headers" -o "$2.part" "$1" &
+    pid=$!
+    # The total comes from the response headers, which curl writes before the picture.
+    while kill -0 "$pid" 2>/dev/null; do
+        sleep 0.5
+        [[ -n $total ]] || total=$(content_length "$2.headers")
+        size=$(stat -c %s "$2.part" 2>/dev/null) || size=0
+        if (( size != last )); then progress "$size" "$total"; last=$size; fi
+    done
+    wait "$pid" || rc=$?
+    if (( last >= 0 )) && [[ -t 2 && ${APOD_PROGRESS:-} != 1 ]]; then echo >&2; fi
+    rm -f "$2.headers"
+    if (( rc == 0 )); then
         # A Wi-Fi login page or an error page can come back as a successful download.
         if magick -ping "$2.part[0]" -format '%w' info: >/dev/null 2>&1 && mv "$2.part" "$2"; then
             # Renders are named by the original's key only; drop any made from an earlier download of it.
@@ -254,27 +292,76 @@ download() {
     log "image download failed"; return 1
 }
 
-big_enough() { (( $(magick "$1[0]" -format '%[fx:max(w,h)]\n' info:) >= RANDOM_MIN_SIZE )); }
+# probe_size URL — the picture's longer side in pixels, read from the start of the file
+# without downloading the rest; nothing when it can't be told.
+probe_size() {
+    local tmp size
+    tmp=$(mktemp) || return 0
+    # A server that ignores the range still stops here: head closes the pipe.
+    curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout "${CONNECT_MAX:-15}" --max-time "${REQUEST_MAX:-60}" \
+        --range "0-$((PROBE_BYTES - 1))" "$1" 2>/dev/null | head -c "$PROBE_BYTES" >"$tmp" || true
+    size=$(magick -ping "$tmp[0]" -format '%[fx:max(w,h)]' info: 2>/dev/null) || size=''
+    rm -f "$tmp"
+    if [[ $size =~ ^[0-9]+$ ]]; then echo "$size"; fi
+    return 0
+}
+
+longer_side() { magick "$1[0]" -format '%[fx:max(w,h)]\n' info:; }
+
+# note_video ENTRY — remember that the newest APOD is a video, for the widget.
+note_video() {
+    jq -c '{date, title, page: "https://science.nasa.gov/apod/?date=\(.date)"}' <<<"$1" >"$DATA/video.json.part" &&
+        mv "$DATA/video.json.part" "$DATA/video.json" || true
+}
 
 # show latest|random|YYYY-MM-DD — fetch a picture and make it the wallpaper and theme.
-# On failure the current picture stays and it returns 1.
+# Videos are passed over; in latest mode the newest one is noted for the widget. Random mode
+# reads each picture's size before downloading it and passes over small ones; when none of
+# MAX_TRIES is big enough it settles for the largest, so it doesn't fail on an archive
+# month full of small pictures. On failure the current picture stays and it returns 1.
 show() {
-    local kind=$1 entry orig small=0
+    local kind=$1 entry orig size date newest=1 tried=0 best='' best_size=0
+    log "looking for a picture"
     while read -r entry <&3; do
         entry=$(resolve "$entry") || continue
-        orig=$(download "$entry") || continue
-        # Many archive images are small; don't blow those up to full screen.
-        if [[ $kind == random ]] && ! big_enough "$orig"; then
-            log "$(basename "$orig") is under ${RANDOM_MIN_SIZE}px, trying another"
-            [[ $orig == "$(cat "$DATA/current" 2>/dev/null)" ]] || rm -f "$orig"
-            small=1
+        date=$(jq -r .date <<<"$entry")
+        if [[ $(jq -r .media_type <<<"$entry") == video ]]; then
+            if [[ $kind == latest ]] && (( newest )); then note_video "$entry"; fi
+            log "$date is a video; trying another"
+            newest=0
             continue
         fi
-        set_entry "$entry" "$orig" || return 1
-        return 0
-    done 3< <(candidates "$kind" | head -n 5)
-    # The widget shows this as the reason, instead of the "trying another" progress lines.
-    if (( small )); then log "the pictures tried were smaller than ${RANDOM_MIN_SIZE}px; try again"; fi
+        if [[ $kind == latest ]] && (( newest )); then rm -f "$DATA/video.json"; fi
+        newest=0
+        if [[ $kind == random ]]; then
+            (( tried < MAX_TRIES )) || break
+            tried=$((tried + 1))
+            log "checking $date: $(jq -r .title <<<"$entry")"
+            size=$(probe_size "$(jq -r '.hdurl // .url' <<<"$entry")")
+            if [[ -n $size ]] && (( size < RANDOM_MIN_SIZE )); then
+                log "$date is only ${size}px; trying another"
+                if (( size > best_size )); then best=$entry best_size=$size; fi
+                continue
+            fi
+        fi
+        orig=$(download "$entry") || continue
+        # The size couldn't be read beforehand; check the download instead.
+        if [[ $kind == random ]] && size=$(longer_side "$orig") && (( size < RANDOM_MIN_SIZE )); then
+            log "$date is only ${size}px; trying another"
+            if (( size > best_size )); then best=$entry best_size=$size; fi
+            [[ $orig == "$(cat "$DATA/current" 2>/dev/null)" ]] || rm -f "$orig"
+            continue
+        fi
+        set_entry "$entry" "$orig"
+        return
+    done 3< <(candidates "$kind")
+    if [[ -n $best ]]; then
+        log "no picture of ${RANDOM_MIN_SIZE}px or more found; using the largest (${best_size}px)"
+        if orig=$(download "$best"); then
+            set_entry "$best" "$orig"
+            return
+        fi
+    fi
     log "no picture fetched; keeping the current one"
     return 1
 }
@@ -292,6 +379,8 @@ cmd_update() {
     fi
     # Today's picture (in HD) is already showing, or we looked recently: nothing to ask NASA.
     if [[ -n $cur && $cur != *-sd.* && $(basename "$cur") == "orig-$(apod_today)."* ]]; then return 0; fi
+    # Today's APOD is a video: the newest photo is already showing.
+    if [[ -n $cur && $(jq -r '.date // empty' "$DATA/video.json" 2>/dev/null) == "$(apod_today)" ]]; then return 0; fi
     checked=$(cat "$DATA/checked" 2>/dev/null) || checked=0
     now=$(date +%s)
     if [[ -n $cur && $checked =~ ^[0-9]+$ ]] && (( now - checked < CHECK_HOURS * 3600 )); then return 0; fi
@@ -335,15 +424,22 @@ primary_size() {
         echo "1920 1080"
 }
 
-# render SRC W H OUT — crop to fill when the aspect ratios are close, otherwise
-# fit the whole image over a darkened, blurred, screen-filling copy of itself.
+# render SRC W H OUT — crop to fill when the aspect ratios are close, otherwise fit the whole
+# image over a darkened, blurred, screen-filling copy of itself. A picture is never enlarged
+# more than MAX_UPSCALE, so a small one is shown whole at that size instead of blurred.
 render() {
-    local src=$1 w=$2 h=$3 out=$4 iw ih mode
+    local src=$1 w=$2 h=$3 out=$4 iw ih mode='' fw fh
     read -r iw ih < <(magick "$src[0]" -auto-orient -format '%w %h\n' info:) ||
         { log "can't read $(basename "$src") as an image"; return 1; }
-    mode=$(awk -v iw="$iw" -v ih="$ih" -v w="$w" -v h="$h" -v t="$FIT_THRESHOLD" \
-        'BEGIN { r = (iw / ih) / (w / h); if (r < 1) r = 1 / r; print (r <= t ? "crop" : "fit") }') || return 1
-    log "rendering ${iw}x${ih} -> ${w}x${h} ($mode)"
+    read -r mode fw fh < <(awk -v iw="$iw" -v ih="$ih" -v w="$w" -v h="$h" -v t="$FIT_THRESHOLD" -v u="$MAX_UPSCALE" 'BEGIN {
+        r = (iw / ih) / (w / h); if (r < 1) r = 1 / r
+        fill = (w / iw > h / ih) ? w / iw : h / ih
+        fit = (w / iw < h / ih) ? w / iw : h / ih
+        if (r <= t && fill <= u) { print "crop", w, h; exit }
+        s = (fit < u) ? fit : u
+        printf "fit %d %d\n", iw * s + 0.5, ih * s + 0.5 }') || true
+    [[ -n $mode ]] || { log "rendering failed"; return 1; }
+    log "fitting the picture to the screen (${iw}x${ih} -> ${w}x${h}, $mode)"
     if [[ $mode == crop ]]; then
         magick "$src[0]" -auto-orient -colorspace sRGB -resize "${w}x${h}^" -gravity center -extent "${w}x${h}" \
             -quality 92 "$out.part.jpg"
@@ -351,7 +447,7 @@ render() {
         magick "$src[0]" -auto-orient -colorspace sRGB -write mpr:s +delete \
             \( mpr:s -resize "${w}x${h}^" -gravity center -extent "${w}x${h}" \
                -scale 10% -blur 0x6 -resize "${w}x${h}!" -modulate 60 \) \
-            \( mpr:s -resize "${w}x${h}" \) \
+            \( mpr:s -resize "${fw}x${fh}!" \) \
             -gravity center -composite -quality 92 "$out.part.jpg"
     fi && mv "$out.part.jpg" "$out" || { rm -f "$out.part.jpg"; log "rendering failed"; return 1; }
 }
@@ -368,6 +464,7 @@ build_theme() {
     title=$(jq -r '"\(.title // "") (\(.date // ""))"' "$meta" 2>/dev/null) || title=''
 
     # The palette comes from the rendered picture: what is actually on screen.
+    log "working out the theme colours"
     python3 -I "$PALETTE" --mode "$COLOR_MODE" --vividness "$VIVIDNESS" --title "$title" \
         --json "$DATA/palette.json.part" "$render" >"$DATA/colors.toml.part" ||
         { rm -f "$DATA/palette.json.part" "$DATA/colors.toml.part"; log "couldn't work out the picture's colours"; return 1; }
@@ -396,6 +493,7 @@ build_theme() {
 # apply_theme — load the rebuilt theme when it is in use, or when SWITCH asks to switch to it.
 apply_theme() {
     if (( SWITCH )) || theme_active; then
+        log "applying the theme"
         omarchy-theme-set "$THEME" >/dev/null || { log "couldn't switch to the APOD theme"; return 1; }
         log "APOD theme applied"
     fi
@@ -403,16 +501,19 @@ apply_theme() {
 
 # Status for the bar widget: current picture's metadata plus mode, render, palette and APOD page.
 cmd_status() {
-    local image='' cur key palette='{}'
+    local image='' cur key palette='{}' video='null'
     if [[ -f $DATA/current ]]; then
         cur=$(<"$DATA/current"); key=$(basename "${cur%.*}"); key=${key#orig-}
         image=$(ls -t "$DATA"/render-"$key"-*.jpg 2>/dev/null | head -1) || true
     fi
     if [[ -f $DATA/palette.json ]]; then palette=$(jq -c '{mode, colors}' "$DATA/palette.json" 2>/dev/null) || palette='{}'; fi
+    if [[ -f $DATA/video.json ]]; then video=$(jq -c '{date, title, page}' "$DATA/video.json" 2>/dev/null) || video='null'; fi
     jq -c --arg mode "$(get_mode)" --arg image "$image" --argjson palette "$palette" \
-          --argjson active "$(theme_active && echo true || echo false)" \
+          --argjson active "$(theme_active && echo true || echo false)" --argjson video "$video" \
           --argjson personal "$(key_is_personal && echo true || echo false)" 'input | . + {
         mode: $mode, image: $image, palette: $palette, themeActive: $active, personalKey: $personal,
+        # A video newer than the picture showing: the widget says why the picture is older.
+        video: (if $mode == "latest" and ($video.date // "") > (.date // "") then $video else null end),
         credit: (.copyright // "" | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ")),
         page: (if .date then "https://science.nasa.gov/apod/?date=\(.date)" else "" end)
     }' -n <<<"$([[ -f $DATA/meta.json ]] && cat "$DATA/meta.json" || echo '{}')"
@@ -494,7 +595,7 @@ usage() {
 # Interactive commands: don't sit behind a background run that's retrying.
 quick() {
     RETRIES=2 RETRY_DELAY=3 RETRY_MAX=20
-    CONNECT_MAX=5 REQUEST_MAX=15 DOWNLOAD_MAX=60
+    CONNECT_MAX=5 REQUEST_MAX=15 DOWNLOAD_MAX=240
 }
 
 SWITCH=0

@@ -23,6 +23,10 @@ BarWidget {
   readonly property var status: apod ? apod.status : ({})
   readonly property string busy: apod ? apod.busy : ""
   readonly property string error: apod ? apod.error : ""
+  readonly property string stage: apod ? apod.stage : ""
+  readonly property real downloaded: apod ? apod.downloaded : 0
+  readonly property real downloadTotal: apod ? apod.downloadTotal : 0
+  readonly property bool downloading: busy !== "" && downloaded > 0
   readonly property bool loaded: !!status.title
   readonly property string mode: status.mode || "latest"
   readonly property var colors: status.palette && status.palette.colors ? status.palette.colors : ({})
@@ -59,7 +63,23 @@ BarWidget {
     })
   }
 
+  function megabytes(bytes) {
+    return (bytes / 1048576).toFixed(1)
+  }
+
+  function downloadText() {
+    if (downloadTotal > 0)
+      return megabytes(downloaded) + " of " + megabytes(downloadTotal) + " MB  ·  "
+        + Math.floor(100 * downloaded / downloadTotal) + "%"
+    return megabytes(downloaded) + " MB"
+  }
+
+  // What the script is doing now, in its own words, without the technical detail in brackets.
   function busyText() {
+    if (stage !== "") {
+      var text = stage.replace(/ \(.*\)$/, "")
+      return text.charAt(0).toUpperCase() + text.slice(1) + "…"
+    }
     if (busy === "update") return "Checking for a new picture…"
     if (busy === "latest") return "Fetching today's picture…"
     if (busy === "random") return "Finding a random picture…"
@@ -87,7 +107,7 @@ BarWidget {
     bar: root.bar
     text: "\uDB85\uDF41"
     dimmed: root.busy !== "" && !root.loaded
-    tooltipText: root.popupOpen ? "" : (root.busy !== "" ? root.busyText()
+    tooltipText: root.popupOpen ? "" : (root.busy !== "" ? root.busyText() + (root.downloading ? "\n" + root.downloadText() : "")
       : root.loaded ? "APOD: " + root.status.title : "NASA APOD")
     onPressed: function(b) {
       if (b === Qt.MiddleButton) {
@@ -265,6 +285,78 @@ BarWidget {
           visible: !!root.status.page
           tooltipText: "Open on science.nasa.gov"
           onClicked: Qt.openUrlExternally(root.status.page)
+        }
+      }
+
+      // On days when APOD is a video, the newest photo stays; say so, with a link to the video.
+      Text {
+        textFormat: Text.PlainText
+        width: parent.width
+        visible: !!root.status.video && root.busy === ""
+        text: root.status.video ? "Today's APOD is a video: " + root.status.video.title
+          + ". Showing the most recent picture." : ""
+        color: root.bar.foreground
+        opacity: 0.75
+        font.family: root.bar.fontFamily
+        font.pixelSize: Style.font.caption
+        font.underline: videoLink.containsMouse
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.Wrap
+
+        MouseArea {
+          id: videoLink
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: if (root.status.video) Qt.openUrlExternally(root.status.video.page)
+        }
+      }
+
+      // Download progress. Without a size from the server, the bar sweeps instead of filling.
+      Column {
+        width: parent.width
+        spacing: Style.space(4)
+        visible: root.downloading
+
+        Rectangle {
+          id: track
+          property real sweep: 0
+          width: parent.width
+          height: Style.space(4)
+          radius: height / 2
+          color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.15)
+          clip: true
+
+          NumberAnimation on sweep {
+            from: 0
+            to: 1
+            duration: 1200
+            loops: Animation.Infinite
+            easing.type: Easing.InOutSine
+            running: root.downloading && root.downloadTotal <= 0
+          }
+
+          Rectangle {
+            height: parent.height
+            radius: parent.radius
+            color: Color.accent
+            width: root.downloadTotal > 0
+              ? Math.max(height, parent.width * Math.min(1, root.downloaded / root.downloadTotal))
+              : parent.width / 4
+            x: root.downloadTotal > 0 ? 0 : track.sweep * (parent.width - width)
+            Behavior on width { NumberAnimation { duration: 400 } }
+          }
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          text: root.downloadText()
+          color: root.bar.foreground
+          opacity: 0.65
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          horizontalAlignment: Text.AlignHCenter
         }
       }
 
