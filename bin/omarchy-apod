@@ -411,8 +411,13 @@ set_entry() {
     fi
     apply_theme || return 1
     prune || log "couldn't clean up old pictures"
+    # The very first picture: the theme is built but not switched to without being asked.
+    if [[ -z $cur ]] && ! theme_active; then
+        notify_ready || true
     # Only announce a picture change, not the HD upgrade of the same picture.
-    if (( is_new )) && [[ $cur != "$DATA/orig-$(jq -r .date <<<"$entry")-sd."* ]]; then notify || true; fi
+    elif (( is_new )) && [[ $cur != "$DATA/orig-$(jq -r .date <<<"$entry")-sd."* ]]; then
+        notify || true
+    fi
     return 0
 }
 
@@ -533,6 +538,15 @@ cmd_status() {
         credit: (.copyright // "" | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ")),
         page: (if .date then "https://science.nasa.gov/apod/?date=\(.date)" else "" end)
     }' -n <<<"$([[ -f $DATA/meta.json ]] && cat "$DATA/meta.json" || echo '{}')"
+}
+
+# notify_ready — the one-time notification after the first picture: how to switch to the theme.
+notify_ready() {
+    local icon
+    icon=$(ls -t "$DATA"/render-*.jpg 2>/dev/null | head -1) || true
+    notify-send --app-name="NASA APOD" --icon="${icon:-image-x-generic}" "Your APOD theme is ready" \
+        "Today's picture: $(jq -r '.title // "?"' "$DATA/meta.json" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'). To use it, click the shooting star in the bar, then Use theme, or pick Apod in the theme switcher." &&
+        log "notified: theme ready" || log "notification failed"
 }
 
 # Desktop notification with the current picture's title, date, credit and NASA's explanation.
@@ -659,8 +673,6 @@ case $cmd in
                 { log "--date needs a date as YYYY-MM-DD"; exit 2; }
         fi
         lock
-        # The first picture ever also switches to the theme: that is what enabling the plugin asks for.
-        [[ -f $DATA/current ]] || SWITCH=1
         cmd_update "$date_arg" ;;
     latest|random)
         quick; lock 60; SWITCH=1

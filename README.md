@@ -33,7 +33,7 @@ Omarchy 4 with the Omarchy shell. Everything else it uses (ImageMagick, jq, curl
 omarchy plugin add https://github.com/smolamSK/omarchy-apod --enable
 ```
 
-The first picture arrives about 20 seconds later, and Omarchy switches to the APOD theme.
+The first picture arrives about 20 seconds later, with a notification once its theme is ready. Your current theme stays until you choose: click the shooting star in the bar and then **Use theme**, or pick **Apod** in the theme switcher.
 
 **Get a free NASA API key** at https://api.nasa.gov (it is shown as soon as you sign up). Copy it, open the widget's settings (the sliders button) and click **Paste key from clipboard**. Or, in a terminal:
 

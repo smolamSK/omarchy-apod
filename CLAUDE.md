@@ -18,7 +18,7 @@ An Omarchy shell plugin (`io.github.smolamsk.apod`) that sets NASA's Astronomy P
 ## Contracts
 
 - **Fetch pipeline, `set -e` behaviour, page fallback, .part files**: as in kde-apod's CLAUDE.md. The page-scraping jq regexes depend on science.nasa.gov's markup.
-- **When the theme is applied.** `apply_theme` runs `omarchy-theme-set apod` only when `SWITCH=1` (latest, random, use, and the very first update) or when the APOD theme is already in use. A background update must never take the user away from a theme they chose.
+- **When the theme is applied.** `apply_theme` runs `omarchy-theme-set apod` only when `SWITCH=1` (the user clicked latest, random or use) or when the APOD theme is already in use. A background update must never change the user's theme, not even the first one after install: that sends `notify_ready` instead.
 - **When anything happens at all.** The service runs `update` 20 s after load and hourly. `cmd_update` must stay cheap when there is nothing new: no network if today's (US Eastern) picture is current or NASA was asked less than `CHECK_HOURS` ago; random mode reshuffles once per day. `set_entry` returns early for an unchanged picture, because re-applying a theme restarts terminals.
 - **Only our own theme folder.** `own_theme_dir` lets `build_theme` and `use` touch `themes/apod` only if it is missing or carries the `.omarchy-apod` marker (or the generated colors.toml header, from before the marker). A user's own `apod` theme is never overwritten.
 - **One background.** `build_theme` keeps exactly one file in the theme's `backgrounds/`; `omarchy-theme-set` cycles through backgrounds and would otherwise pick an older picture.

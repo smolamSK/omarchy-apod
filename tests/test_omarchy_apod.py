@@ -103,6 +103,25 @@ set_entry "$ENTRY" "$DATA/orig-2026-10-01.jpg"
         self.assertEqual(self.events(), ["notified"])
         self.assertTrue((self.theme / "colors.toml").exists())
 
+    def test_first_picture_builds_the_theme_without_switching_to_it(self):
+        (self.state / "theme.name").write_text("tokyo-night\n")
+        self.run_bash('''
+prune() { :; }
+notify-send() { echo "notify: ${@: -2:1}" >>"$DATA/events"; }
+set_entry "$ENTRY" "$DATA/orig-2026-10-01.jpg"
+''')
+        self.assertEqual(self.events(), ["notify: Your APOD theme is ready"])
+        self.assertTrue((self.theme / "colors.toml").exists())
+        # The next picture is announced as usual, and still doesn't switch.
+        self.env["ENTRY"] = json.dumps({**ENTRY, "date": "2026-10-02", "title": "Next"})
+        make_image(self.data / "orig-2026-10-02.jpg", "-size", "64x40", "xc:#204060")
+        self.run_bash('''
+prune() { :; }
+notify-send() { echo "notify: ${@: -2:1}" >>"$DATA/events"; }
+set_entry "$ENTRY" "$DATA/orig-2026-10-02.jpg"
+''')
+        self.assertEqual(self.events(), ["notify: Your APOD theme is ready", "notify: Next"])
+
     def test_theme_in_use_is_reapplied_with_a_new_picture(self):
         (self.state / "theme.name").write_text("apod\n")
         self.run_bash('prune() { :; }; set_entry "$ENTRY" "$DATA/orig-2026-10-01.jpg"')
