@@ -149,27 +149,22 @@ Item {
   }
 
   // The NASA key is kept out of shell.json, which every user can read: `omarchy-apod key`
-  // stores it privately. Passed over stdin, never argv. An empty key removes it.
+  // stores it privately. The script reads it from the clipboard itself, so it never passes
+  // through argv or this process.
   property bool savingKey: false
   property string keyError: ""
 
-  function saveKey(key) {
-    if (keyProc.running) return
+  // how: "clipboard" or "clear". Bar popups get no keyboard, so the key comes from the clipboard.
+  function saveKey(how) {
+    if (keyProc.running || (how !== "clipboard" && how !== "clear")) return
     root.keyError = ""
     root.savingKey = true
-    keyProc.payload = key
-    keyProc.command = key === "" ? [root.script, "key", "--clear"] : [root.script, "key"]
+    keyProc.command = [root.script, "key", "--" + how]
     keyProc.running = true
   }
 
   Process {
     id: keyProc
-    property string payload: ""
-    stdinEnabled: true
-    onStarted: {
-      write(payload + "\n")
-      payload = ""
-    }
     stderr: StdioCollector { id: keyErr; waitForEnd: true }
     onExited: function(code) {
       if (code !== 0) {

@@ -83,7 +83,7 @@ omarchy-apod random                      switch to random mode and show a random
 omarchy-apod use                         switch to the APOD theme with the current picture
 omarchy-apod apply                       rebuild the theme from the current picture (after a settings change)
 omarchy-apod preview IMAGE               print the colors.toml a picture would get; changes nothing
-omarchy-apod key [--clear]               save your NASA API key (asked for, or read from stdin), privately
+omarchy-apod key [--clipboard|--clear]   save your NASA API key (asked for, from stdin or the clipboard), privately
 omarchy-apod configure                   save settings from one line of JSON on stdin (the bar widget uses this)
 omarchy-apod notify                      show the current picture's title again
 omarchy-apod status                      current picture, mode and palette as JSON (for the bar widget)

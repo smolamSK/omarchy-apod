@@ -107,7 +107,6 @@ BarWidget {
   onColorModeChanged: { shownColorMode = colorMode; pushSettings() }
   onVividnessChanged: { shownVividness = vividness; pushSettings() }
   onNotifyChanged: { shownNotify = notify; pushSettings() }
-  onPopupOpenChanged: if (!popupOpen) keyField.text = ""
 
   Timer {
     interval: 200
@@ -420,33 +419,21 @@ BarWidget {
           wrapMode: Text.Wrap
         }
 
+        // Bar popups get no keyboard, so the key comes from the clipboard: copy it on
+        // api.nasa.gov, then click. The script reads and checks it, and stores it privately.
         Row {
-          width: parent.width
           spacing: Style.space(6)
           visible: root.apiKey === ""
 
-          TextField {
-            id: keyField
-            width: parent.width - saveKey.width - parent.spacing
-            password: true
-            placeholderText: root.status.personalKey ? "Replace it with another key" : "Paste your key from api.nasa.gov"
-            foreground: root.bar.foreground
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            onAccepted: if (saveKey.enabled) saveKey.clicked()
-          }
-
           Button {
-            id: saveKey
             iconText: "\uDB80\uDF06"
-            text: "Save"
+            text: root.status.personalKey ? "Replace from clipboard" : "Paste key from clipboard"
             foreground: root.bar.foreground
-            enabled: keyField.text.trim() !== "" && !(root.apod && root.apod.savingKey)
+            fontSize: Style.font.bodySmall
+            enabled: !(root.apod && root.apod.savingKey)
             opacity: enabled ? 1.0 : 0.4
-            onClicked: {
-              root.apod.saveKey(keyField.text.trim())
-              keyField.text = ""
-            }
+            tooltipText: "Copy your key on api.nasa.gov first"
+            onClicked: root.apod.saveKey("clipboard")
           }
         }
 
@@ -482,7 +469,7 @@ BarWidget {
               anchors.fill: parent
               hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
-              onClicked: root.apod.saveKey("")
+              onClicked: root.apod.saveKey("clear")
             }
           }
         }

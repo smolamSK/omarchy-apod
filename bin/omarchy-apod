@@ -8,7 +8,7 @@
 #   omarchy-apod use                         switch to the APOD theme with the current picture
 #   omarchy-apod apply                       rebuild the theme from the current picture (after a settings change)
 #   omarchy-apod preview IMAGE               print the colors.toml a picture would get; changes nothing
-#   omarchy-apod key [--clear]               save your NASA API key (asked for, or read from stdin), privately
+#   omarchy-apod key [--clipboard|--clear]   save your NASA API key (asked for, from stdin or the clipboard), privately
 #   omarchy-apod configure                   save settings from one line of JSON on stdin (the bar widget uses this)
 #   omarchy-apod notify                      show the current picture's title again
 #   omarchy-apod status                      current picture, mode and palette as JSON (for the bar widget)
@@ -570,12 +570,19 @@ cmd_configure() {
     fi
 }
 
-# cmd_key [--clear] — save the NASA API key in the private settings file. It is asked for
-# (without echo) in a terminal, or read from stdin, so it never shows in the process list.
+# cmd_key [--clipboard|--clear] — save the NASA API key in the private settings file. It is
+# asked for (without echo) in a terminal, read from stdin, or taken from the clipboard (the
+# widget's button: bar popups get no keyboard), so it never shows in the process list.
 # Unlike shell.json, which every user on the computer can read, settings.json is private.
 cmd_key() {
     local key='' new
-    if [[ ${1:-} != --clear ]]; then
+    if [[ ${1:-} == --clipboard ]]; then
+        need wl-paste
+        key=$(wl-paste --no-newline --type text 2>/dev/null | head -c 256) || key=''
+        key=${key//[[:space:]]/}
+        [[ $key =~ ^[A-Za-z0-9]{20,128}$ ]] ||
+            { log "the clipboard doesn't hold a NASA API key; copy the key from api.nasa.gov first"; return 2; }
+    elif [[ ${1:-} != --clear ]]; then
         if [[ -t 0 ]]; then
             printf 'NASA API key (from https://api.nasa.gov): ' >&2
             IFS= read -r -s key || true

@@ -404,6 +404,23 @@ fetch https://apod.nasa.gov/image.jpg "$DATA/download.jpg" || true
         self.assertEqual(json.loads(path.read_text())["apiKey"], "")
         self.assertEqual(json.loads(path.read_text())["colorMode"], "auto")
 
+    def test_key_from_clipboard(self):
+        fake = Path(self.temp.name) / "bin"
+        fake.mkdir()
+        (fake / "wl-paste").write_text('#!/bin/sh\nprintf "%s" "$CLIPBOARD"\n')
+        (fake / "wl-paste").chmod(0o755)
+        self.env["PATH"] = f"{fake}:{self.env['PATH']}"
+        path = self.data / "settings.json"
+        for clipboard, ok in [("some copied sentence", False), ("short1", False),
+                              ("$(touch pwned)aaaaaaaaaaaaaaaaaaaa", False),
+                              ("  abcdefghij0123456789KEY \n", True)]:
+            with self.subTest(clipboard=clipboard):
+                self.env["CLIPBOARD"] = clipboard
+                result = self.run_cli("key", "--clipboard")
+                self.assertEqual(result.returncode, 0 if ok else 2, result.stderr)
+        self.assertEqual(json.loads(path.read_text())["apiKey"], "abcdefghij0123456789KEY")
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
     def test_status_and_help_do_not_create_state(self):
         for f in self.data.iterdir():
             f.unlink()
