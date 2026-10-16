@@ -76,6 +76,8 @@ The shell picks up a change to the file within a second.
 
 The APOD theme is an ordinary Omarchy theme called **Apod**, in the theme switcher like any other. When you switch to another theme, new pictures still arrive and the APOD theme is kept up to date, but your chosen theme stays until you pick **Apod** again (or click **Use theme** in the widget).
 
+The plugin only writes to a theme folder it created itself: if you already have your own theme called `apod`, it leaves it alone and tells you to rename it.
+
 The theme is rewritten with every picture, so don't edit it by hand. To keep a palette you like, copy it first: `cp -r ~/.config/omarchy/themes/apod ~/.config/omarchy/themes/my-nebula`.
 
 ## Command line
