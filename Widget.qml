@@ -378,7 +378,7 @@ BarWidget {
         textFormat: Text.PlainText
         width: parent.width
         visible: root.error.indexOf("DEMO_KEY") >= 0 || (root.error.indexOf("rate limit") >= 0 && root.status.personalKey === false)
-        text: "Get a free key at api.nasa.gov and paste it into this widget's settings."
+        text: "Get a free key at api.nasa.gov, then save it with: ~/.config/omarchy/plugins/io.github.smolamsk.apod/bin/omarchy-apod key"
         color: root.bar.foreground
         opacity: 0.65
         font.family: root.bar.fontFamily

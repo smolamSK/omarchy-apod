@@ -379,8 +379,30 @@ fetch https://apod.nasa.gov/image.jpg "$DATA/download.jpg" || true
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         bad = self.run_cli("configure", stdin='{"apiKey": "$(touch pwned)"}\n')
         self.assertEqual(bad.returncode, 0, bad.stderr)
-        self.assertEqual(json.loads(path.read_text())["apiKey"], "")
+        # An invalid key is dropped, so the one saved before stays; nothing ran.
+        self.assertEqual(json.loads(path.read_text())["apiKey"], "abcDEF")
+        self.assertEqual(list(Path(self.temp.name).rglob("pwned")), [])
+        self.assertFalse((Path.cwd() / "pwned").exists())
         self.assertEqual(self.run_cli("configure", stdin="not json\n").returncode, 2)
+
+    def test_saved_key_is_private_and_survives_the_widget(self):
+        path = self.data / "settings.json"
+        result = self.run_cli("key", stdin="  abcDEF123  \n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(path.read_text())["apiKey"], "abcDEF123")
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        # The widget sends no key (none in shell.json): the saved one stays.
+        self.run_cli("configure", stdin='{"apiKey": "", "colorMode": "Dark"}\n')
+        self.assertEqual(json.loads(path.read_text()),
+                         {"apiKey": "abcDEF123", "colorMode": "dark", "vividness": "balanced", "notify": True})
+        # A key in shell.json wins.
+        self.run_cli("configure", stdin='{"apiKey": "fromShellJson"}\n')
+        self.assertEqual(json.loads(path.read_text())["apiKey"], "fromShellJson")
+        self.assertEqual(self.run_cli("key", stdin="not a key!\n").returncode, 2)
+        self.assertEqual(json.loads(path.read_text())["apiKey"], "fromShellJson")
+        self.assertEqual(self.run_cli("key", "--clear").returncode, 0)
+        self.assertEqual(json.loads(path.read_text())["apiKey"], "")
+        self.assertEqual(json.loads(path.read_text())["colorMode"], "auto")
 
     def test_status_and_help_do_not_create_state(self):
         for f in self.data.iterdir():

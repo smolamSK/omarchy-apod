@@ -8,12 +8,13 @@
 #   omarchy-apod use                         switch to the APOD theme with the current picture
 #   omarchy-apod apply                       rebuild the theme from the current picture (after a settings change)
 #   omarchy-apod preview IMAGE               print the colors.toml a picture would get; changes nothing
+#   omarchy-apod key [--clear]               save your NASA API key (asked for, or read from stdin), privately
 #   omarchy-apod configure                   save settings from one line of JSON on stdin (the bar widget uses this)
 #   omarchy-apod notify                      show the current picture's title again
 #   omarchy-apod status                      current picture, mode and palette as JSON (for the bar widget)
 #   omarchy-apod help                        these commands, plus which NASA API key is used
 #
-# Settings: the plugin's settings in Omarchy, saved to ~/.local/share/omarchy-apod/settings.json
+# Settings: the widget's entry in ~/.config/omarchy/shell.json, saved to ~/.local/share/omarchy-apod/settings.json
 # https://github.com/smolamSK/omarchy-apod
 set -euo pipefail
 umask 077
@@ -95,8 +96,7 @@ key_hint() {
 Get a free personal NASA API key (much higher limits) at https://api.nasa.gov:
   1. Fill in your name and email in the "Generate API Key" form.
   2. The key is shown right away and also emailed to you.
-  3. Paste it into the APOD widget's settings (Omarchy menu → Setup → Bar, or
-     right-click the bar), under "NASA API key".
+  3. Save it with:  $HERE/omarchy-apod key
 EOF
 }
 
@@ -556,6 +556,8 @@ cmd_configure() {
         notify: (.notify != false)
     }' <<<"$line" 2>/dev/null) || { log "settings are not valid JSON"; return 2; }
     old=$(jq -c . "$DATA/settings.json" 2>/dev/null) || old=$defaults
+    # No key in shell.json keeps the one saved with `omarchy-apod key`.
+    new=$(jq -c --argjson old "$old" 'if .apiKey == "" then .apiKey = ($old.apiKey // "") else . end' <<<"$new")
     [[ $new != "$old" ]] || return 0
     lock 60
     printf '%s\n' "$new" >"$DATA/settings.json.part" && mv "$DATA/settings.json.part" "$DATA/settings.json" ||
@@ -566,6 +568,30 @@ cmd_configure() {
         load_settings
         cmd_apply
     fi
+}
+
+# cmd_key [--clear] — save the NASA API key in the private settings file. It is asked for
+# (without echo) in a terminal, or read from stdin, so it never shows in the process list.
+# Unlike shell.json, which every user on the computer can read, settings.json is private.
+cmd_key() {
+    local key='' new
+    if [[ ${1:-} != --clear ]]; then
+        if [[ -t 0 ]]; then
+            printf 'NASA API key (from https://api.nasa.gov): ' >&2
+            IFS= read -r -s key || true
+            echo >&2
+        else
+            IFS= read -r -t 10 -n 256 key || true
+        fi
+        key=${key//[[:space:]]/}
+        [[ $key =~ ^[A-Za-z0-9]{1,128}$ ]] || { log "a NASA API key is letters and digits only"; return 2; }
+    fi
+    lock 60
+    new=$(jq -c --arg k "$key" '. + {apiKey: $k}' "$DATA/settings.json" 2>/dev/null) ||
+        new=$(jq -nc --arg k "$key" '{apiKey: $k}')
+    printf '%s\n' "$new" >"$DATA/settings.json.part" && mv "$DATA/settings.json.part" "$DATA/settings.json" ||
+        { log "couldn't save the key"; return 1; }
+    if [[ -n $key ]]; then log "API key saved"; else log "API key removed; using the shared DEMO_KEY"; fi
 }
 
 # Drop cached originals and renders older than KEEP_DAYS, except the current image's.
@@ -621,6 +647,7 @@ case $cmd in
         if [[ -f $THEME_DIR/colors.toml && -f $DATA/current ]]; then apply_theme; else cmd_apply; fi ;;
     apply) quick; lock 60; cmd_apply ;;
     configure) need jq flock; quick; cmd_configure ;;
+    key) need jq flock; cmd_key "${1:-}" ;;
     preview)
         need magick python3
         [[ -f ${1:-} ]] || { log "preview needs a picture file"; exit 2; }

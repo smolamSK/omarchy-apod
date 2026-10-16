@@ -33,7 +33,7 @@
         "type": "string",
         "label": "NASA API key",
         "defaultValue": "",
-        "description": "Free from api.nasa.gov, shown right after signing up. Empty uses the shared DEMO_KEY, which runs out quickly. Letters and digits only."
+        "description": "Free from api.nasa.gov, shown right after signing up. shell.json is readable by every user on the computer, so rather leave this empty and save the key privately with `bin/omarchy-apod key` in the plugin folder. With no key at all, the shared DEMO_KEY is used, which runs out quickly."
       },
       {
         "key": "colorMode",

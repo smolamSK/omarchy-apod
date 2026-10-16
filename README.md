@@ -34,20 +34,33 @@ omarchy plugin add https://github.com/smolamSK/omarchy-apod --enable
 
 The first picture arrives about 20 seconds later, and Omarchy switches to the APOD theme.
 
-**Get a free NASA API key** at https://api.nasa.gov (it is shown as soon as you sign up) and paste it into the widget's settings. Without one, the shared `DEMO_KEY` is used. It is limited per IP address and runs out quickly, especially when using Random. When the API is unavailable, the picture is read from the APOD website instead.
+**Get a free NASA API key** at https://api.nasa.gov (it is shown as soon as you sign up) and save it:
+
+```sh
+~/.config/omarchy/plugins/io.github.smolamsk.apod/bin/omarchy-apod key
+```
+
+It asks for the key without showing it, and keeps it in a file only you can read. Without a key, the shared `DEMO_KEY` is used. It is limited per IP address and runs out quickly, especially when using Random. When the API is unavailable, the picture is read from the APOD website instead.
 
 ## Settings
 
-In the widget's settings in Omarchy:
+Omarchy has no settings screen for plugins yet. A widget's settings go next to its `id` in the bar layout in `~/.config/omarchy/shell.json`:
 
-| Setting | Default | Meaning |
+```json
+"right": [
+  { "id": "io.github.smolamsk.apod", "colorMode": "Dark", "vividness": "Vivid" },
+  ...
+]
+```
+
+| Key | Default | Meaning |
 |---|---|---|
-| NASA API key | empty (`DEMO_KEY`) | Your key from api.nasa.gov. |
-| Theme brightness | Auto | Auto, Dark or Light. Auto picks light for bright pictures. |
-| Colour strength | Balanced | Subtle, Balanced or Vivid: how strongly the picture tints the theme. |
-| Announce new pictures | on | The notification when the picture changes. |
+| `colorMode` | `"Auto"` | `"Auto"`, `"Dark"` or `"Light"`. Auto picks light for bright pictures. |
+| `vividness` | `"Balanced"` | `"Subtle"`, `"Balanced"` or `"Vivid"`: how strongly the picture tints the theme. |
+| `notify` | `true` | The notification when the picture changes. |
+| `apiKey` | `""` | Your NASA API key. Better saved with `omarchy-apod key` (see Install): `shell.json` is readable by every user on the computer. A key here wins over a saved one. |
 
-Changing the brightness or colour strength rebuilds the theme from the current picture right away.
+The shell picks up a saved change within a second. Changing `colorMode` or `vividness` rebuilds the theme from the current picture right away.
 
 ## Switching themes
 
@@ -70,6 +83,7 @@ omarchy-apod random                      switch to random mode and show a random
 omarchy-apod use                         switch to the APOD theme with the current picture
 omarchy-apod apply                       rebuild the theme from the current picture (after a settings change)
 omarchy-apod preview IMAGE               print the colors.toml a picture would get; changes nothing
+omarchy-apod key [--clear]               save your NASA API key (asked for, or read from stdin), privately
 omarchy-apod configure                   save settings from one line of JSON on stdin (the bar widget uses this)
 omarchy-apod notify                      show the current picture's title again
 omarchy-apod status                      current picture, mode and palette as JSON (for the bar widget)
@@ -107,7 +121,7 @@ Omarchy generates everything else in the theme (terminals, btop, editors, the ba
 ## Troubleshooting
 
 - **See what happened:** run `bin/omarchy-apod update` (or `latest`) from the plugin folder in a terminal; it explains each step.
-- **"NASA API rate limit reached":** you're using `DEMO_KEY`. Get a free key and paste it into the widget's settings.
+- **"NASA API rate limit reached":** you're using `DEMO_KEY`. Get a free key and save it with `omarchy-apod key`.
 - **Wrong fit after changing your monitor's resolution or rotation:** click **Latest** or **Shuffle**, or run `omarchy-apod apply`.
 
 ## Development
