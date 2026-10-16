@@ -4,6 +4,8 @@ NASA's [Astronomy Picture of the Day](https://science.nasa.gov/apod/) as your Om
 
 ![The APOD widget and a theme made from the picture](preview.png)
 
+The screenshot shows Webb's Southern Ring Nebula (NASA, ESA, CSA, STScI), from APOD 2022-07-14.
+
 This is the Omarchy version of [kde-apod](https://github.com/smolamSK/kde-apod).
 
 ## Features
@@ -106,6 +108,18 @@ Omarchy generates everything else in the theme (terminals, btop, editors, the ba
 - **See what happened:** run `bin/omarchy-apod update` (or `latest`) from the plugin folder in a terminal; it explains each step.
 - **"NASA API rate limit reached":** you're using `DEMO_KEY`. Get a free key and paste it into the widget's settings.
 - **Wrong fit after changing your monitor's resolution or rotation:** click **Latest** or **Shuffle**, or run `omarchy-apod apply`.
+
+## Development
+
+There is no build step. From the repository root:
+
+```sh
+bash -n bin/omarchy-apod
+python3 -B -m unittest discover -s tests -v
+omarchy plugin validate .
+```
+
+The tests use temporary state and mock the desktop and network calls. To try changes in the running shell, commit and run `git pull` in `~/.config/omarchy/plugins/io.github.smolamsk.apod`; changes to the QML files need `omarchy restart shell`.
 
 ## License
 

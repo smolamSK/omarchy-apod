@@ -151,7 +151,7 @@ page_entry() {
         def text: gsub("<br[^>]*>"; " ") | gsub("<[^>]*>"; "")
             | gsub("&#(?<n>[0-9]+);"; [.n | tonumber] | implode)
             | gsub("&amp;"; "&") | gsub("&lt;"; "<") | gsub("&gt;"; ">") | gsub("&quot;"; "\"") | gsub("&nbsp;"; " ")
-            | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ");
+            | gsub("\\s+"; " ") | gsub(" (?<p>[,.;:!?])"; .p) | ltrimstr(" ") | rtrimstr(" ");
         def grab(re): [match(re).captures[0].string][0];
         gsub("\n"; " ") as $h
         | select($h | grab("<meta property=\"og:title\" content=\"([^\"]*)\"") // "" | startswith($want))
