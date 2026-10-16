@@ -32,6 +32,20 @@ BarWidget {
   readonly property var colors: status.palette && status.palette.colors ? status.palette.colors : ({})
 
   property bool popupOpen: false
+  property bool showSettings: false
+
+  // What the settings controls show: the shell.json value, or the one just clicked while
+  // `omarchy bar set` writes it (the file then reloads and they agree again).
+  property string shownColorMode: colorMode
+  property string shownVividness: vividness
+  property bool shownNotify: notify
+
+  function changeSetting(key, value) {
+    if (key === "colorMode") shownColorMode = value
+    else if (key === "vividness") shownVividness = value
+    else if (key === "notify") shownNotify = value
+    if (apod) apod.setSetting(key, value)
+  }
   // open/close/opened let `omarchy-shell shell summon|hide|toggle io.github.smolamsk.apod`
   // drive the popup, e.g. from a keybinding.
   readonly property bool opened: popupOpen
@@ -90,9 +104,10 @@ BarWidget {
 
   onBarChanged: bindService()
   onApiKeyChanged: pushSettings()
-  onColorModeChanged: pushSettings()
-  onVividnessChanged: pushSettings()
-  onNotifyChanged: pushSettings()
+  onColorModeChanged: { shownColorMode = colorMode; pushSettings() }
+  onVividnessChanged: { shownVividness = vividness; pushSettings() }
+  onNotifyChanged: { shownNotify = notify; pushSettings() }
+  onPopupOpenChanged: if (!popupOpen) keyField.text = ""
 
   Timer {
     interval: 200
@@ -286,6 +301,202 @@ BarWidget {
           tooltipText: "Open on science.nasa.gov"
           onClicked: Qt.openUrlExternally(root.status.page)
         }
+
+        Button {
+          iconText: "\uDB81\uDE2E"
+          foreground: root.bar.foreground
+          selected: root.showSettings
+          tooltipText: root.showSettings ? "Hide settings" : "Settings"
+          onClicked: root.showSettings = !root.showSettings
+        }
+      }
+
+      // Settings. Saved to this widget's entry in ~/.config/omarchy/shell.json, except the
+      // NASA key, which goes to a private file instead.
+      Column {
+        id: settingsPane
+        visible: root.showSettings
+        width: parent.width
+        spacing: Style.space(8)
+
+        PanelSeparator { width: parent.width; foreground: root.bar.foreground }
+
+        Item {
+          width: parent.width
+          height: brightness.implicitHeight
+
+          Text {
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Theme"
+            color: root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          ButtonGroup {
+            id: brightness
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            options: [
+              { value: "Auto", label: "Auto", tooltip: "Light for bright pictures, dark for the rest" },
+              { value: "Dark", label: "Dark" },
+              { value: "Light", label: "Light" }
+            ]
+            value: root.shownColorMode
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            fontSize: Style.font.bodySmall
+            focusable: false
+            onChanged: function(v) { if (v !== root.shownColorMode) root.changeSetting("colorMode", v) }
+          }
+        }
+
+        Item {
+          width: parent.width
+          height: strength.implicitHeight
+
+          Text {
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Colours"
+            color: root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          ButtonGroup {
+            id: strength
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            options: [
+              { value: "Subtle", label: "Subtle" },
+              { value: "Balanced", label: "Balanced" },
+              { value: "Vivid", label: "Vivid" }
+            ]
+            value: root.shownVividness
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            fontSize: Style.font.bodySmall
+            focusable: false
+            onChanged: function(v) { if (v !== root.shownVividness) root.changeSetting("vividness", v) }
+          }
+        }
+
+        Item {
+          width: parent.width
+          height: notifySwitch.implicitHeight
+
+          Text {
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Announce new pictures"
+            color: root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          ToggleSwitch {
+            id: notifySwitch
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            checked: root.shownNotify
+            foreground: root.bar.foreground
+            cursorRing: false
+            onToggled: root.changeSetting("notify", !root.shownNotify)
+          }
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          text: root.apiKey !== "" ? "NASA API key: the one in shell.json"
+            : root.status.personalKey ? "NASA API key: your own, saved privately"
+            : "NASA API key: the shared DEMO_KEY, which runs out quickly"
+          color: root.bar.foreground
+          opacity: 0.75
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.Wrap
+        }
+
+        Row {
+          width: parent.width
+          spacing: Style.space(6)
+          visible: root.apiKey === ""
+
+          TextField {
+            id: keyField
+            width: parent.width - saveKey.width - parent.spacing
+            password: true
+            placeholderText: root.status.personalKey ? "Replace it with another key" : "Paste your key from api.nasa.gov"
+            foreground: root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            onAccepted: if (saveKey.enabled) saveKey.clicked()
+          }
+
+          Button {
+            id: saveKey
+            iconText: "\uDB80\uDF06"
+            text: "Save"
+            foreground: root.bar.foreground
+            enabled: keyField.text.trim() !== "" && !(root.apod && root.apod.savingKey)
+            opacity: enabled ? 1.0 : 0.4
+            onClicked: {
+              root.apod.saveKey(keyField.text.trim())
+              keyField.text = ""
+            }
+          }
+        }
+
+        Row {
+          spacing: Style.space(12)
+          visible: root.apiKey === ""
+
+          Text {
+            text: "Get a free key"
+            color: Color.accent
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            font.underline: getKey.containsMouse
+            MouseArea {
+              id: getKey
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: Qt.openUrlExternally("https://api.nasa.gov")
+            }
+          }
+
+          Text {
+            visible: root.status.personalKey === true
+            text: "Remove saved key"
+            color: root.bar.foreground
+            opacity: 0.65
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            font.underline: removeKey.containsMouse
+            MouseArea {
+              id: removeKey
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.apod.saveKey("")
+            }
+          }
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          visible: !!root.apod && root.apod.keyError !== ""
+          text: root.apod ? root.apod.keyError : ""
+          color: Color.urgent
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.Wrap
+        }
       }
 
       // On days when APOD is a video, the newest photo stays; say so, with a link to the video.
@@ -378,7 +589,7 @@ BarWidget {
         textFormat: Text.PlainText
         width: parent.width
         visible: root.error.indexOf("DEMO_KEY") >= 0 || (root.error.indexOf("rate limit") >= 0 && root.status.personalKey === false)
-        text: "Get a free key at api.nasa.gov, then save it with: ~/.config/omarchy/plugins/io.github.smolamsk.apod/bin/omarchy-apod key"
+        text: "Get a free key at api.nasa.gov and save it under the settings button above."
         color: root.bar.foreground
         opacity: 0.65
         font.family: root.bar.fontFamily

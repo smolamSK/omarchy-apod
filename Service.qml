@@ -121,6 +121,66 @@ Item {
     configProc.running = true
   }
 
+  // Settings live in the widget's entry in shell.json. `omarchy bar set` writes them there
+  // through the shell, which hot-reloads the file and hands the widget the new values;
+  // the widget then passes them to the script like any other change. One at a time, in order.
+  property var settingQueue: []
+
+  function setSetting(key, value) {
+    root.settingQueue = root.settingQueue.concat([[key, JSON.stringify(value)]])
+    root.nextSetting()
+  }
+
+  function nextSetting() {
+    if (settingProc.running || root.settingQueue.length === 0) return
+    var item = root.settingQueue[0]
+    root.settingQueue = root.settingQueue.slice(1)
+    settingProc.command = ["omarchy-bar", "set", "io.github.smolamsk.apod", item[0], item[1], "--json"]
+    settingProc.running = true
+  }
+
+  Process {
+    id: settingProc
+    stderr: StdioCollector { id: settingErr; waitForEnd: true }
+    onExited: function(code) {
+      if (code !== 0) root.error = "couldn't save the setting: " + String(settingErr.text || "").trim()
+      root.nextSetting()
+    }
+  }
+
+  // The NASA key is kept out of shell.json, which every user can read: `omarchy-apod key`
+  // stores it privately. Passed over stdin, never argv. An empty key removes it.
+  property bool savingKey: false
+  property string keyError: ""
+
+  function saveKey(key) {
+    if (keyProc.running) return
+    root.keyError = ""
+    root.savingKey = true
+    keyProc.payload = key
+    keyProc.command = key === "" ? [root.script, "key", "--clear"] : [root.script, "key"]
+    keyProc.running = true
+  }
+
+  Process {
+    id: keyProc
+    property string payload: ""
+    stdinEnabled: true
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
+    }
+    stderr: StdioCollector { id: keyErr; waitForEnd: true }
+    onExited: function(code) {
+      if (code !== 0) {
+        var lines = String(keyErr.text || "").split("\n").filter(function(l) { return l.indexOf("omarchy-apod: ") === 0 })
+        root.keyError = lines.length ? lines[0].slice(14) : "couldn't save the key"
+      }
+      root.savingKey = false
+      root.refresh()
+    }
+  }
+
   Process {
     id: actionProc
     environment: ({ APOD_PROGRESS: "1" })
