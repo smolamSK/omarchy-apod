@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.smolamsk.apod",
+  "name": "NASA APOD",
+  "version": "1.0.0",
+  "author": "smolamSK",
+  "description": "NASA's Astronomy Picture of the Day as your wallpaper, in a theme coloured from the picture",
+  "homepage": "https://github.com/smolamSK/omarchy-apod",
+  "license": "GPL-2.0-or-later",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Widget.qml"
+  },
+  "barWidget": {
+    "displayName": "NASA APOD",
+    "description": "Today's or a random Astronomy Picture of the Day, with its story and the theme colours taken from it.",
+    "category": "Desktop",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "apiKey": "",
+      "colorMode": "Auto",
+      "vividness": "Balanced",
+      "notify": true
+    },
+    "schema": [
+      {
+        "key": "apiKey",
+        "type": "string",
+        "label": "NASA API key",
+        "defaultValue": "",
+        "description": "Free from api.nasa.gov, shown right after signing up. Empty uses the shared DEMO_KEY, which runs out quickly. Letters and digits only."
+      },
+      {
+        "key": "colorMode",
+        "type": "enum",
+        "label": "Theme brightness",
+        "options": [
+          "Auto",
+          "Dark",
+          "Light"
+        ],
+        "defaultValue": "Auto",
+        "description": "Auto picks a light theme for bright pictures and a dark one for the rest, which is most of the sky."
+      },
+      {
+        "key": "vividness",
+        "type": "enum",
+        "label": "Colour strength",
+        "options": [
+          "Subtle",
+          "Balanced",
+          "Vivid"
+        ],
+        "defaultValue": "Balanced",
+        "description": "How strongly the picture's colours tint the background, accent and terminal colours. Text stays readable at every level."
+      },
+      {
+        "key": "notify",
+        "type": "boolean",
+        "label": "Announce new pictures",
+        "defaultValue": true,
+        "description": "A notification with the title, credit and NASA's explanation when the picture changes."
+      }
+    ]
+  }
+}

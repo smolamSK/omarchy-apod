@@ -1,0 +1,531 @@
+#!/usr/bin/env bash
+# omarchy-apod — NASA's Astronomy Picture of the Day as the Omarchy wallpaper,
+# in an "APOD" theme whose colours are taken from the picture.
+#
+#   omarchy-apod update [--date YYYY-MM-DD]  daily run: newest picture, or a random one in random mode
+#   omarchy-apod latest                      switch to latest mode and show today's picture
+#   omarchy-apod random                      switch to random mode and show a random archive picture
+#   omarchy-apod use                         switch to the APOD theme with the current picture
+#   omarchy-apod apply                       rebuild the theme from the current picture (after a settings change)
+#   omarchy-apod preview IMAGE               print the colors.toml a picture would get; changes nothing
+#   omarchy-apod configure                   save settings from one line of JSON on stdin (the bar widget uses this)
+#   omarchy-apod notify                      show the current picture's title again
+#   omarchy-apod status                      current picture, mode and palette as JSON (for the bar widget)
+#   omarchy-apod help                        these commands, plus which NASA API key is used
+#
+# Settings: the plugin's settings in Omarchy, saved to ~/.local/share/omarchy-apod/settings.json
+# https://github.com/smolamSK/omarchy-apod
+set -euo pipefail
+umask 077
+
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-apod"
+THEME=apod
+THEME_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/themes/$THEME"
+THEME_NAME_FILE="$HOME/.local/state/omarchy/current/theme.name"
+HERE=$(dirname "$(readlink -f "$0")")
+PALETTE="$HERE/apod-palette.py"
+
+API_KEY=DEMO_KEY          # get a personal key at https://api.nasa.gov if DEMO_KEY gets rate-limited
+COLOR_MODE=auto           # auto, dark or light
+VIVIDNESS=balanced        # subtle, balanced or vivid
+NOTIFY=true               # notification when the picture changes
+FIT_THRESHOLD=1.2         # aspect mismatch above which the picture is fitted over a blurred copy instead of cropped
+KEEP_DAYS=7
+RANDOM_SINCE=2007-01-01   # random mode: pick from the archive since this date
+RANDOM_MIN_SIZE=1920      # random mode: skip pictures whose longer side is smaller
+CHECK_HOURS=3             # latest mode: look for a new picture at most this often
+RETRIES=10 RETRY_DELAY=30 RETRY_MAX=900   # patient in the background; the widget's commands give up sooner
+
+log() { echo "omarchy-apod: $*" >&2; }
+
+# need CMD... — exit with a clear message if a required command is missing.
+need() {
+    local c missing=()
+    for c; do command -v "$c" >/dev/null || missing+=("$c"); done
+    (( ${#missing[@]} == 0 )) || { log "missing required commands: ${missing[*]}"; exit 3; }
+}
+
+# setting KEY PATTERN — the value of KEY in settings.json if it matches PATTERN, else nothing.
+# The file is written by the shell plugin, so every value is checked before use.
+setting() {
+    local v
+    v=$(jq -r --arg k "$1" '.[$k] // empty | tostring' "$DATA/settings.json" 2>/dev/null) || return 0
+    if [[ $v =~ $2 ]]; then printf '%s\n' "$v"; fi
+}
+
+load_settings() {
+    local v
+    [[ -f $DATA/settings.json ]] || return 0
+    v=$(setting apiKey '^[A-Za-z0-9]{1,128}$'); API_KEY=${v:-$API_KEY}
+    v=$(setting colorMode '^(auto|dark|light)$'); COLOR_MODE=${v:-$COLOR_MODE}
+    v=$(setting vividness '^(subtle|balanced|vivid)$'); VIVIDNESS=${v:-$VIVIDNESS}
+    v=$(setting notify '^(true|false)$'); NOTIFY=${v:-$NOTIFY}
+    v=$(setting keepDays '^[0-9]{1,4}$'); KEEP_DAYS=${v:-$KEEP_DAYS}
+    v=$(setting fitThreshold '^[0-9]{1,2}(\.[0-9]{1,3})?$'); FIT_THRESHOLD=${v:-$FIT_THRESHOLD}
+    v=$(setting randomSince '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'); RANDOM_SINCE=${v:-$RANDOM_SINCE}
+    v=$(setting randomMinSize '^[0-9]{1,5}$'); RANDOM_MIN_SIZE=${v:-$RANDOM_MIN_SIZE}
+    return 0
+}
+load_settings
+# A key in the environment wins, for trying one out without saving it.
+if [[ ${APOD_API_KEY:-} =~ ^[A-Za-z0-9]{1,128}$ ]]; then API_KEY=$APOD_API_KEY; fi
+
+# lock [SECONDS] — one writing run at a time; with SECONDS, give up after waiting that long.
+lock() {
+    mkdir -p "$DATA"; exec 9>"$DATA/.lock"
+    flock ${1:+-w "$1"} 9 || { log "another update is still running; try again in a few minutes"; exit 1; }
+}
+
+get_mode() { cat "$DATA/mode" 2>/dev/null || echo latest; }
+
+# The day APOD is on right now: it changes at midnight US Eastern time.
+apod_today() { TZ=America/New_York date +%F; }
+
+theme_active() { [[ $(cat "$THEME_NAME_FILE" 2>/dev/null) == "$THEME" ]]; }
+
+# A personal key from api.nasa.gov is a long alphanumeric string; anything else
+# (DEMO_KEY, empty, a pasted placeholder) means the shared, rate-limited key.
+key_is_personal() { [[ $API_KEY =~ ^[A-Za-z0-9]{20,}$ && $API_KEY != DEMO_KEY ]]; }
+
+key_hint() {
+    cat <<EOF
+Get a free personal NASA API key (much higher limits) at https://api.nasa.gov:
+  1. Fill in your name and email in the "Generate API Key" form.
+  2. The key is shown right away and also emailed to you.
+  3. Paste it into the APOD widget's settings (Omarchy menu → Setup → Bar, or
+     right-click the bar), under "NASA API key".
+EOF
+}
+
+# api QUERY — raw APOD API response, with a readable error for rate limits and bad keys.
+api() {
+    local out code tmp
+    # Via a file, which curl truncates before each retry; on stdout a failed attempt's body would stay.
+    tmp=$(mktemp)
+    code=$(curl -sS --connect-timeout "${CONNECT_MAX:-15}" --max-time "${REQUEST_MAX:-60}" --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-max-time "$RETRY_MAX" \
+        -o "$tmp" -w '%{http_code}' "https://api.nasa.gov/planetary/apod?api_key=$API_KEY&$1") ||
+        { rm -f "$tmp"; log "NASA API unreachable"; return 1; }
+    out=$(<"$tmp"); rm -f "$tmp"
+    case $code in
+        200) printf '%s\n' "$out" ;;
+        429) log "NASA API rate limit reached$(key_is_personal || echo ' (shared DEMO_KEY); see: omarchy-apod help')"; return 1 ;;
+        *) out=$(jq -r '.msg // .error.message // empty' <<<"$out" 2>/dev/null) || out=''
+           log "NASA API error $code${out:+: $out}"; return 1 ;;
+    esac
+}
+
+# Since APOD moved to science.nasa.gov the API can return the site's logo and name
+# instead of the real entry; such entries, and bare {"date": ...} stubs, need page_entry.
+NEEDS_PAGE='(.title == null or .title == "NASA Science" or (.url // "" | test("/wp-content/themes/")))'
+
+# entries QUERY DATE... — APOD API entries for QUERY, one per line, keeping still images
+# and entries that need page_entry; if the API fails, {"date": ...} stubs for DATE... instead.
+entries() {
+    local query=$1 out parsed; shift
+    if out=$(api "$query"); then
+        # Buffer parsing so a broken response cannot emit partial entries before fallback.
+        if parsed=$(jq -cs "
+            if length == 1 then .[0] else error(\"expected one response\") end
+            | if type == \"array\" then .[] else . end
+            | if type == \"object\" and (.date | type == \"string\") then .
+              else error(\"expected an APOD entry\") end
+            | select($NEEDS_PAGE or .media_type == \"image\")" <<<"$out" 2>/dev/null); then
+            [[ -z $parsed ]] || printf '%s\n' "$parsed"
+            return 0
+        fi
+        log "NASA API returned an unreadable response"
+    fi
+    log "trying the APOD website instead"
+    printf '{"date":"%s"}\n' "$@"
+}
+
+# page_entry DATE — the APOD entry for DATE read from its science.nasa.gov page, in the API's format.
+page_entry() {
+    local date=$1 html want
+    # The page's og:title starts with this; an empty one would match any page.
+    want=$(LC_ALL=C date -d "$date" '+APOD: %Y %B %-d ') || { log "not a date: $date"; return 1; }
+    html=$(curl -fsSL --connect-timeout "${CONNECT_MAX:-15}" --max-time "${REQUEST_MAX:-60}" --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-max-time "$RETRY_MAX" \
+        "https://science.nasa.gov/apod/?date=$date") || { log "APOD page for $date unreachable"; return 1; }
+    # Unpublished dates show the APOD landing page, whose og:title has no date.
+    jq -Rsc --arg date "$date" --arg want "$want" '
+        def text: gsub("<br[^>]*>"; " ") | gsub("<[^>]*>"; "")
+            | gsub("&#(?<n>[0-9]+);"; [.n | tonumber] | implode)
+            | gsub("&amp;"; "&") | gsub("&lt;"; "<") | gsub("&gt;"; ">") | gsub("&quot;"; "\"") | gsub("&nbsp;"; " ")
+            | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ");
+        def grab(re): [match(re).captures[0].string][0];
+        gsub("\n"; " ") as $h
+        | select($h | grab("<meta property=\"og:title\" content=\"([^\"]*)\"") // "" | startswith($want))
+        # The picture (or video) is the last media element before the heading; og:image is
+        # sometimes a generic thumbnail. The original sits under content/dam without the query.
+        | ($h | split("<h1 class=\"display-48")[0] | [match("<img [^>]*?src=\"[^\"]*\"|<iframe|<video"; "g").string] | last // "") as $hero
+        | ($hero | grab("src=\"(https://assets\\.science\\.nasa\\.gov/[^\"?]*)")
+           | if . then sub("/dynamicimage/assets/"; "/content/dam/") else . end) as $img
+        | {
+            date: $date,
+            title: ($h | grab("<h1 class=\"display-48[^>]*>(.*?)</h1>") | values | text),
+            explanation: ($h | grab("media-detail-hero__description\">(.*?)</p>") | values | text | sub("^Explanation: ?"; "")),
+            copyright: ($h | grab(">[^<]*Credit[^<]*</th>\\s*<td[^>]*>(.*?)</td>") | values | text
+                        | sub("^(Image |Video )?Credit( & Copyright)?: ?"; "")),
+            media_type: (if $hero | test("^<(iframe|video)") then "video" elif $img then "image" else "other" end),
+            url: $img, hdurl: $img
+          }
+        | select(.title)' <<<"$html" | grep . || { log "no APOD entry for $date on the website"; return 1; }
+}
+
+# resolve ENTRY — the entry itself, or its page_entry when the API's copy is bad; fails unless a still image.
+resolve() {
+    local entry=$1
+    if jq -e "$NEEDS_PAGE" <<<"$entry" >/dev/null; then
+        entry=$(page_entry "$(jq -r .date <<<"$entry")") || return 1
+    fi
+    # Only https from NASA's own hosts: the URL comes from a web page.
+    jq -e '.media_type == "image" and ((.hdurl // .url) | test("^https://([a-z0-9-]+\\.)*nasa\\.gov/"))' <<<"$entry" >/dev/null || return 1
+    echo "$entry"
+}
+
+# Newest first over 10 days, so that on video days we fall back to the latest photo.
+latest_entries() {
+    local i dates=() today
+    today=$(apod_today)
+    for i in {10..0}; do dates+=("$(date -d "$today -$i days" +%F)"); done
+    entries "start_date=${dates[0]}" "${dates[@]}" | tac
+}
+
+# A random month of the archive since RANDOM_SINCE, shuffled: one API request gives plenty of candidates.
+random_entries() {
+    local days start i dates=()
+    days=$(( ($(date +%s) - $(date -d "$RANDOM_SINCE" +%s)) / 86400 - 30 ))
+    (( days > 0 )) || days=1
+    start=$(date -d "$RANDOM_SINCE + $(( (RANDOM * 32768 + RANDOM) % days )) days" +%F)
+    for i in {0..29}; do dates+=("$(date -d "$start + $i days" +%F)"); done
+    entries "start_date=$start&end_date=${dates[29]}" "${dates[@]}" | shuf
+}
+
+# candidates latest|random|YYYY-MM-DD — APOD entries to try, one JSON object per line.
+candidates() {
+    case $1 in
+        latest) latest_entries ;;
+        random) random_entries ;;
+        *) entries "date=$1" "$1" ;;
+    esac
+}
+
+# orig_path ENTRY URL [SUFFIX] — cache path for the entry's original, with the URL's extension.
+orig_path() {
+    local ext=${2##*.}; ext=${ext%%\?*}; ext=${ext,,}
+    [[ $ext =~ ^(jpg|jpeg|png|gif|webp|tif|tiff)$ ]] || ext=jpg
+    echo "$DATA/orig-$(jq -r .date <<<"$1")${3:+-$3}.$ext"
+}
+
+# fetch URL FILE — download URL to FILE (a cached original), leaving nothing behind on failure.
+fetch() {
+    local key
+    if curl -fsSL --proto '=https' --proto-redir '=https' --max-filesize 200M \
+            --connect-timeout "${CONNECT_MAX:-15}" --max-time "${DOWNLOAD_MAX:-300}" --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-max-time "$RETRY_MAX" \
+            -o "$2.part" "$1"; then
+        # A Wi-Fi login page or an error page can come back as a successful download.
+        if magick -ping "$2.part[0]" -format '%w' info: >/dev/null 2>&1 && mv "$2.part" "$2"; then
+            # Renders are named by the original's key only; drop any made from an earlier download of it.
+            key=$(basename "${2%.*}"); rm -f "$DATA/render-${key#orig-}-"*
+            return
+        fi
+        log "the download of $(basename "$1") is not an image"
+    fi
+    rm -f "$2.part"; return 1
+}
+
+# download ENTRY — print the path of the entry's cached original, downloading it if needed.
+download() {
+    local entry=$1 hd sd orig
+    hd=$(jq -r '.hdurl // .url' <<<"$entry"); sd=$(jq -r '.url // empty' <<<"$entry")
+    orig=$(orig_path "$entry" "$hd")
+    if [[ -s $orig ]]; then echo "$orig"; return; fi
+    log "downloading $(jq -r '"\(.date): \(.title)"' <<<"$entry")"
+    if fetch "$hd" "$orig"; then echo "$orig"; return; fi
+    # NASA sometimes lists an HD image that isn't on the server (yet). Use the standard-size
+    # one, cached under its own name so a later run still picks up the HD image.
+    if [[ -n $sd && $sd != "$hd" ]]; then
+        orig=$(orig_path "$entry" "$sd" sd)
+        if [[ -s $orig ]] || fetch "$sd" "$orig"; then
+            log "HD image unavailable; using the standard-size one"
+            echo "$orig"; return
+        fi
+    fi
+    log "image download failed"; return 1
+}
+
+big_enough() { (( $(magick "$1[0]" -format '%[fx:max(w,h)]\n' info:) >= RANDOM_MIN_SIZE )); }
+
+# show latest|random|YYYY-MM-DD — fetch a picture and make it the wallpaper and theme.
+# On failure the current picture stays and it returns 1.
+show() {
+    local kind=$1 entry orig small=0
+    while read -r entry <&3; do
+        entry=$(resolve "$entry") || continue
+        orig=$(download "$entry") || continue
+        # Many archive images are small; don't blow those up to full screen.
+        if [[ $kind == random ]] && ! big_enough "$orig"; then
+            log "$(basename "$orig") is under ${RANDOM_MIN_SIZE}px, trying another"
+            [[ $orig == "$(cat "$DATA/current" 2>/dev/null)" ]] || rm -f "$orig"
+            small=1
+            continue
+        fi
+        set_entry "$entry" "$orig" || return 1
+        return 0
+    done 3< <(candidates "$kind" | head -n 5)
+    # The widget shows this as the reason, instead of the "trying another" progress lines.
+    if (( small )); then log "the pictures tried were smaller than ${RANDOM_MIN_SIZE}px; try again"; fi
+    log "no picture fetched; keeping the current one"
+    return 1
+}
+
+# Background entry point (the plugin runs it at login and every hour): follows the
+# mode chosen in the widget, and does nothing at all when there is nothing new.
+cmd_update() {
+    local date_arg=$1 cur checked now
+    if [[ -n $date_arg ]]; then show "$date_arg"; return; fi
+    cur=$(cat "$DATA/current" 2>/dev/null) || true
+    if [[ $(get_mode) == random ]]; then
+        # One random picture a day, not one per login.
+        [[ -n $cur && $(cat "$DATA/changed" 2>/dev/null) == "$(date +%F)" ]] || show random
+        return
+    fi
+    # Today's picture (in HD) is already showing, or we looked recently: nothing to ask NASA.
+    if [[ -n $cur && $cur != *-sd.* && $(basename "$cur") == "orig-$(apod_today)."* ]]; then return 0; fi
+    checked=$(cat "$DATA/checked" 2>/dev/null) || checked=0
+    now=$(date +%s)
+    if [[ -n $cur && $checked =~ ^[0-9]+$ ]] && (( now - checked < CHECK_HOURS * 3600 )); then return 0; fi
+    show latest || return 1
+    echo "$now" >"$DATA/checked"
+}
+
+# set_entry ENTRY ORIG — make the downloaded picture current; rebuild and apply the theme if it is new.
+set_entry() {
+    local entry=$1 orig=$2 is_new=0 cur
+    cur=$(cat "$DATA/current" 2>/dev/null) || true   # no current picture on the first run
+    # The HD image replacing its standard-size stand-in counts as new for the theme
+    # (it gets re-rendered) but not for the notification.
+    [[ $cur == "$orig" ]] || is_new=1
+    if (( ! is_new && ! SWITCH )); then return 0; fi
+    # Prepare state first, then publish only after the theme was applied.
+    # Renaming each file also keeps status readers from seeing truncated JSON.
+    if ! { jq . <<<"$entry" >"$DATA/meta.json.part" && date +%F >"$DATA/changed.part"; }; then
+        log "couldn't save picture information"; return 1
+    fi
+    if (( is_new )) || [[ ! -f $THEME_DIR/colors.toml ]]; then
+        build_theme "$orig" "$DATA/meta.json.part" || return 1
+    fi
+    if ! { mv "$DATA/meta.json.part" "$DATA/meta.json" &&
+           printf '%s\n' "$orig" >"$DATA/current.part" && mv "$DATA/current.part" "$DATA/current" &&
+           mv "$DATA/changed.part" "$DATA/changed"; }; then
+        log "couldn't save picture information"; return 1
+    fi
+    apply_theme || return 1
+    prune || log "couldn't clean up old pictures"
+    # Only announce a picture change, not the HD upgrade of the same picture.
+    if (( is_new )) && [[ $cur != "$DATA/orig-$(jq -r .date <<<"$entry")-sd."* ]]; then notify || true; fi
+    return 0
+}
+
+# primary_size — "W H" of the first monitor in pixels (swapped when rotated), or 1920 1080.
+primary_size() {
+    hyprctl monitors -j 2>/dev/null | jq -er '
+        map(select(.disabled != true)) | sort_by(.id) | .[0]
+        | if (.transform % 2) == 1 then "\(.height) \(.width)" else "\(.width) \(.height)" end' 2>/dev/null ||
+        echo "1920 1080"
+}
+
+# render SRC W H OUT — crop to fill when the aspect ratios are close, otherwise
+# fit the whole image over a darkened, blurred, screen-filling copy of itself.
+render() {
+    local src=$1 w=$2 h=$3 out=$4 iw ih mode
+    read -r iw ih < <(magick "$src[0]" -auto-orient -format '%w %h\n' info:) ||
+        { log "can't read $(basename "$src") as an image"; return 1; }
+    mode=$(awk -v iw="$iw" -v ih="$ih" -v w="$w" -v h="$h" -v t="$FIT_THRESHOLD" \
+        'BEGIN { r = (iw / ih) / (w / h); if (r < 1) r = 1 / r; print (r <= t ? "crop" : "fit") }') || return 1
+    log "rendering ${iw}x${ih} -> ${w}x${h} ($mode)"
+    if [[ $mode == crop ]]; then
+        magick "$src[0]" -auto-orient -colorspace sRGB -resize "${w}x${h}^" -gravity center -extent "${w}x${h}" \
+            -quality 92 "$out.part.jpg"
+    else
+        magick "$src[0]" -auto-orient -colorspace sRGB -write mpr:s +delete \
+            \( mpr:s -resize "${w}x${h}^" -gravity center -extent "${w}x${h}" \
+               -scale 10% -blur 0x6 -resize "${w}x${h}!" -modulate 60 \) \
+            \( mpr:s -resize "${w}x${h}" \) \
+            -gravity center -composite -quality 92 "$out.part.jpg"
+    fi && mv "$out.part.jpg" "$out" || { rm -f "$out.part.jpg"; log "rendering failed"; return 1; }
+}
+
+# build_theme ORIG META — render ORIG for the monitor and write the APOD theme from it.
+build_theme() {
+    local orig=$1 meta=$2 key w h render bg title sw=() k
+    key=$(basename "${orig%.*}"); key=${key#orig-}
+    read -r w h < <(primary_size)
+    # Include the fit setting so changing it cannot reuse an old rendering.
+    render="$DATA/render-$key-${w}x$h-fit$FIT_THRESHOLD.jpg"
+    if [[ ! -s $render ]]; then render "$orig" "$w" "$h" "$render" || return 1; fi
+    touch "$render"
+    title=$(jq -r '"\(.title // "") (\(.date // ""))"' "$meta" 2>/dev/null) || title=''
+
+    # The palette comes from the rendered picture: what is actually on screen.
+    python3 -I "$PALETTE" --mode "$COLOR_MODE" --vividness "$VIVIDNESS" --title "$title" \
+        --json "$DATA/palette.json.part" "$render" >"$DATA/colors.toml.part" ||
+        { rm -f "$DATA/palette.json.part" "$DATA/colors.toml.part"; log "couldn't work out the picture's colours"; return 1; }
+
+    # The theme switcher's preview: the picture with the palette along the bottom.
+    for k in background lighter_background selection accent red orange yellow green cyan blue magenta foreground; do
+        sw+=("xc:$(jq -r ".colors.$k" "$DATA/palette.json.part")")
+    done
+    magick "$render" -colorspace sRGB -type TrueColor -resize 1800x1012^ -gravity center -extent 1800x1012 \
+        \( -size 150x56 "${sw[@]}" +append \) -gravity south -composite \
+        -type TrueColor -quality 88 "$DATA/preview.jpg.part" || { log "couldn't make the theme preview"; return 1; }
+
+    # Exactly one background, so Omarchy can't cycle to an older picture.
+    mkdir -p "$THEME_DIR/backgrounds" || { log "couldn't create $THEME_DIR"; return 1; }
+    bg="$THEME_DIR/backgrounds/apod-$key.jpg"
+    if ! { cp "$render" "$bg.part" && mv "$bg.part" "$bg" &&
+           mv "$DATA/preview.jpg.part" "$THEME_DIR/preview.jpg" &&
+           mv "$DATA/colors.toml.part" "$THEME_DIR/colors.toml" &&
+           mv "$DATA/palette.json.part" "$DATA/palette.json"; }; then
+        log "couldn't write the APOD theme"; return 1
+    fi
+    find "$THEME_DIR/backgrounds" -maxdepth 1 -type f ! -name "apod-$key.jpg" -delete
+    log "theme built from $key ($(jq -r .mode "$DATA/palette.json"), accent $(jq -r .colors.accent "$DATA/palette.json"))"
+}
+
+# apply_theme — load the rebuilt theme when it is in use, or when SWITCH asks to switch to it.
+apply_theme() {
+    if (( SWITCH )) || theme_active; then
+        omarchy-theme-set "$THEME" >/dev/null || { log "couldn't switch to the APOD theme"; return 1; }
+        log "APOD theme applied"
+    fi
+}
+
+# Status for the bar widget: current picture's metadata plus mode, render, palette and APOD page.
+cmd_status() {
+    local image='' cur key palette='{}'
+    if [[ -f $DATA/current ]]; then
+        cur=$(<"$DATA/current"); key=$(basename "${cur%.*}"); key=${key#orig-}
+        image=$(ls -t "$DATA"/render-"$key"-*.jpg 2>/dev/null | head -1) || true
+    fi
+    if [[ -f $DATA/palette.json ]]; then palette=$(jq -c '{mode, colors}' "$DATA/palette.json" 2>/dev/null) || palette='{}'; fi
+    jq -c --arg mode "$(get_mode)" --arg image "$image" --argjson palette "$palette" \
+          --argjson active "$(theme_active && echo true || echo false)" \
+          --argjson personal "$(key_is_personal && echo true || echo false)" 'input | . + {
+        mode: $mode, image: $image, palette: $palette, themeActive: $active, personalKey: $personal,
+        credit: (.copyright // "" | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ")),
+        page: (if .date then "https://science.nasa.gov/apod/?date=\(.date)" else "" end)
+    }' -n <<<"$([[ -f $DATA/meta.json ]] && cat "$DATA/meta.json" || echo '{}')"
+}
+
+# Desktop notification with the current picture's title, date, credit and NASA's explanation.
+notify() {
+    local meta="$DATA/meta.json" body icon
+    [[ -f $meta && $NOTIFY == true ]] || return 0
+    body=$(jq -r '
+        (.copyright // "" | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ")) as $c
+        | "\(.date)\(if $c != "" then " · © " + $c else "" end)\n\n\(.explanation // "")"
+        | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;")' "$meta")
+    icon=$(ls -t "$DATA"/render-*.jpg 2>/dev/null | head -1) || true
+    notify-send --app-name="NASA APOD" --icon="${icon:-image-x-generic}" \
+        "$(jq -r .title "$meta")" "$body" && log "notified: $(jq -r .title "$meta")" || log "notification failed"
+}
+
+# cmd_apply — rebuild the theme from the current picture, e.g. after the colour settings changed.
+cmd_apply() {
+    local orig
+    orig=$(cat "$DATA/current" 2>/dev/null) || true
+    if [[ -z $orig || ! -f $orig || ! -f $DATA/meta.json ]]; then
+        log "no picture yet; fetching today's"
+        show latest
+        return
+    fi
+    build_theme "$orig" "$DATA/meta.json" && apply_theme
+}
+
+# cmd_configure — save the plugin's settings, given as one line of JSON on stdin (so the
+# API key never shows up in the process list), and rebuild the theme if a colour setting changed.
+cmd_configure() {
+    local line new old defaults='{"colorMode":"auto","vividness":"balanced"}'
+    IFS= read -r -t 10 -n 8192 line || [[ -n $line ]] || { log "configure reads one line of JSON on stdin"; return 2; }
+    new=$(jq -c '{
+        apiKey: (.apiKey // "" | tostring | gsub("\\s"; "") | if test("^[A-Za-z0-9]{1,128}$") then . else "" end),
+        colorMode: (.colorMode // "auto" | tostring | ascii_downcase | if IN("auto", "dark", "light") then . else "auto" end),
+        vividness: (.vividness // "balanced" | tostring | ascii_downcase | if IN("subtle", "balanced", "vivid") then . else "balanced" end),
+        notify: (.notify != false)
+    }' <<<"$line" 2>/dev/null) || { log "settings are not valid JSON"; return 2; }
+    old=$(jq -c . "$DATA/settings.json" 2>/dev/null) || old=$defaults
+    [[ $new != "$old" ]] || return 0
+    lock 60
+    printf '%s\n' "$new" >"$DATA/settings.json.part" && mv "$DATA/settings.json.part" "$DATA/settings.json" ||
+        { log "couldn't save the settings"; return 1; }
+    log "settings saved"
+    if [[ $(jq -c '[.colorMode, .vividness]' <<<"$new") != "$(jq -c '[.colorMode // "auto", .vividness // "balanced"]' <<<"$old")" &&
+          -f $DATA/current ]]; then
+        load_settings
+        cmd_apply
+    fi
+}
+
+# Drop cached originals and renders older than KEEP_DAYS, except the current image's.
+prune() {
+    local cur key
+    cur=$(<"$DATA/current")
+    key=$(basename "${cur%.*}"); key=${key#orig-}
+    find "$DATA" -maxdepth 1 -type f \( -name 'orig-*' -o -name 'render-*' \) \
+        -mtime +"$KEEP_DAYS" ! -name "*$key*" -delete
+}
+
+usage() {
+    # The comment header up to the first non-comment line, minus the Settings/URL lines.
+    sed -n '2,/^[^#]/{/^[^#]/d; /^# Settings:/d; /^# https:/d; s/^# \{0,1\}//p}' "$0"
+    echo "Pictures: $DATA"
+    echo "Theme:    $THEME_DIR"
+    echo "Source:   https://github.com/smolamSK/omarchy-apod"
+    echo
+    if key_is_personal; then
+        echo "NASA API key: personal key"
+    else
+        echo "NASA API key: shared DEMO_KEY (rate-limited per IP address; runs out quickly)"
+        key_hint | sed 's/^/  /'
+    fi
+}
+
+# Interactive commands: don't sit behind a background run that's retrying.
+quick() {
+    RETRIES=2 RETRY_DELAY=3 RETRY_MAX=20
+    CONNECT_MAX=5 REQUEST_MAX=15 DOWNLOAD_MAX=60
+}
+
+SWITCH=0
+cmd=${1:-update}; shift || true
+case $cmd in
+    update|latest|random|use|apply) need curl jq magick python3 notify-send flock shuf omarchy-theme-set ;;&
+    update)
+        date_arg=''
+        if [[ ${1:-} == --date ]]; then
+            date_arg=${2:-}
+            [[ $date_arg =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] && date -d "$date_arg" >/dev/null 2>&1 ||
+                { log "--date needs a date as YYYY-MM-DD"; exit 2; }
+        fi
+        lock
+        # The first picture ever also switches to the theme: that is what enabling the plugin asks for.
+        [[ -f $DATA/current ]] || SWITCH=1
+        cmd_update "$date_arg" ;;
+    latest|random)
+        quick; lock 60; SWITCH=1
+        show "$cmd" && echo "$cmd" >"$DATA/mode" ;;
+    use)
+        quick; lock 60; SWITCH=1
+        if [[ -f $THEME_DIR/colors.toml && -f $DATA/current ]]; then apply_theme; else cmd_apply; fi ;;
+    apply) quick; lock 60; cmd_apply ;;
+    configure) need jq flock; quick; cmd_configure ;;
+    preview)
+        need magick python3
+        [[ -f ${1:-} ]] || { log "preview needs a picture file"; exit 2; }
+        python3 -I "$PALETTE" --mode "$COLOR_MODE" --vividness "$VIVIDNESS" "$1" ;;
+    status) need jq; cmd_status ;;
+    notify) NOTIFY=true; notify ;;
+    help|-h|--help) usage ;;
+    *) log "unknown command: $cmd"; log "run: omarchy-apod help"; exit 2 ;;
+esac
