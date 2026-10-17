@@ -53,7 +53,7 @@ need() {
 # The file is written by the shell plugin, so every value is checked before use.
 setting() {
     local v
-    v=$(jq -r --arg k "$1" '.[$k] // empty | tostring' "$DATA/settings.json" 2>/dev/null) || return 0
+    v=$(jq -r --arg k "$1" '.[$k] | select(. != null) | tostring' "$DATA/settings.json" 2>/dev/null) || return 0
     if [[ $v =~ $2 ]]; then printf '%s\n' "$v"; fi
 }
 
@@ -105,8 +105,10 @@ api() {
     local out code tmp
     # Via a file, which curl truncates before each retry; on stdout a failed attempt's body would stay.
     tmp=$(mktemp)
-    code=$(curl -sS --connect-timeout "${CONNECT_MAX:-15}" --max-time "${REQUEST_MAX:-60}" --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-max-time "$RETRY_MAX" \
-        -o "$tmp" -w '%{http_code}' "https://api.nasa.gov/planetary/apod?api_key=$API_KEY&$1") ||
+    # The validated alphanumeric key travels over stdin, never in process arguments.
+    code=$(printf 'data-urlencode = "api_key=%s"\n' "$API_KEY" |
+        curl -sS --get --config - --connect-timeout "${CONNECT_MAX:-15}" --max-time "${REQUEST_MAX:-60}" --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-max-time "$RETRY_MAX" \
+        -o "$tmp" -w '%{http_code}' "https://api.nasa.gov/planetary/apod?$1") ||
         { rm -f "$tmp"; log "NASA API unreachable"; return 1; }
     out=$(<"$tmp"); rm -f "$tmp"
     case $code in
@@ -404,12 +406,12 @@ set_entry() {
     if (( is_new )) || [[ ! -f $THEME_DIR/colors.toml ]]; then
         build_theme "$orig" "$DATA/meta.json.part" || return 1
     fi
+    apply_theme || return 1
     if ! { mv "$DATA/meta.json.part" "$DATA/meta.json" &&
            printf '%s\n' "$orig" >"$DATA/current.part" && mv "$DATA/current.part" "$DATA/current" &&
            mv "$DATA/changed.part" "$DATA/changed"; }; then
         log "couldn't save picture information"; return 1
     fi
-    apply_theme || return 1
     prune || log "couldn't clean up old pictures"
     # The very first picture: the theme is built but not switched to without being asked.
     if [[ -z $cur ]] && ! theme_active; then
@@ -543,6 +545,7 @@ cmd_status() {
 # notify_ready — the one-time notification after the first picture: how to switch to the theme.
 notify_ready() {
     local icon
+    [[ $NOTIFY == true ]] || return 0
     icon=$(ls -t "$DATA"/render-*.jpg 2>/dev/null | head -1) || true
     notify-send --app-name="NASA APOD" --icon="${icon:-image-x-generic}" "Your APOD theme is ready" \
         "Today's picture: $(jq -r '.title // "?"' "$DATA/meta.json" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'). To use it, click the shooting star in the bar, then Use theme, or pick Apod in the theme switcher." &&

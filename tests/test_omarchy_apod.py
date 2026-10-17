@@ -103,6 +103,39 @@ set_entry "$ENTRY" "$DATA/orig-2026-10-01.jpg"
         self.assertEqual(self.events(), ["notified"])
         self.assertTrue((self.theme / "colors.toml").exists())
 
+    def test_disabled_notifications_cover_first_and_later_pictures(self):
+        (self.data / "settings.json").write_text('{"notify":false}')
+        self.run_bash('''
+build_theme() { :; }
+prune() { :; }
+set_entry "$ENTRY" "$DATA/orig-2026-10-01.jpg"
+set_entry "$ENTRY" "$DATA/orig-2026-10-02.jpg"
+''')
+        self.assertEqual(self.events(), [])
+
+    def test_failed_application_preserves_state_and_retries(self):
+        previous = {"current": str(self.data / "orig-2026-09-30.jpg"),
+                    "meta.json": '{"title":"Old"}', "changed": "yesterday"}
+        for name, content in previous.items():
+            (self.data / name).write_text(content)
+        (self.state / "theme.name").write_text("apod\n")
+        self.run_bash('''
+build_theme() { :; }
+omarchy-theme-set() { return 1; }
+if set_entry "$ENTRY" "$DATA/orig-2026-10-01.jpg"; then exit 9; fi
+''')
+        for name, content in previous.items():
+            self.assertEqual((self.data / name).read_text(), content)
+        self.assertEqual(self.events(), [])
+        self.run_bash('''
+apod_today() { echo 2026-10-01; }
+candidates() { echo "$ENTRY"; }
+build_theme() { :; }
+cmd_update ""
+''')
+        self.assertEqual((self.data / "current").read_text().strip(), str(self.orig))
+        self.assertEqual(self.events(), ["theme-set apod", "notified"])
+
     def test_first_picture_builds_the_theme_without_switching_to_it(self):
         (self.state / "theme.name").write_text("tokyo-night\n")
         self.run_bash('''
@@ -405,6 +438,29 @@ fetch https://apod.nasa.gov/image.jpg "$DATA/download.jpg" || true
             self.assertIn("--connect-timeout 5", request)
             self.assertIn(f"--max-time {limit} ", request)
         self.assertIn("--proto =https", requests[2])
+
+    def test_api_key_is_passed_over_stdin_not_process_arguments(self):
+        self.run_bash('''
+API_KEY=TestPersonalKey1234567890
+curl() {
+    printf '%s\\n' "$@" >"$DATA/curl-args"
+    cat >"$DATA/curl-config"
+    while (( $# )); do
+        if [[ $1 == -o ]]; then printf '%s' "$ENTRY" >"$2"; shift; fi
+        shift
+    done
+    printf 200
+}
+api date=2026-10-01 >"$DATA/response"
+''')
+        args = (self.data / "curl-args").read_text().splitlines()
+        self.assertNotIn("TestPersonalKey1234567890", " ".join(args))
+        self.assertEqual(args[args.index("--config") + 1], "-")
+        self.assertIn("--get", args)
+        self.assertIn("https://api.nasa.gov/planetary/apod?date=2026-10-01", args)
+        self.assertEqual((self.data / "curl-config").read_text(),
+                         'data-urlencode = "api_key=TestPersonalKey1234567890"\n')
+        self.assertEqual(json.loads((self.data / "response").read_text()), ENTRY)
 
     # ------------------------------------------------------------ CLI
 

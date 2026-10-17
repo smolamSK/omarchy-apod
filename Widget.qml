@@ -263,8 +263,8 @@ BarWidget {
           text: "Latest"
           foreground: root.bar.foreground
           selected: root.mode === "latest"
-          // Once today's picture is showing there is nothing more to fetch.
-          enabled: root.busy === "" && !(root.mode === "latest" && root.loaded)
+          // Allow an explicit retry even when an older picture is already loaded.
+          enabled: root.apod !== null && root.busy === ""
           opacity: enabled || selected ? 1.0 : 0.4
           tooltipText: "NASA's newest picture, every day"
           onClicked: root.apod.run("latest")
