@@ -6,7 +6,7 @@ NASA's [Astronomy Picture of the Day](https://science.nasa.gov/apod/) as your Om
 
 The screenshot shows Webb's Southern Ring Nebula (NASA, ESA, CSA, STScI), from APOD 2022-07-14.
 
-This is the Omarchy version of [kde-apod](https://github.com/smolamSK/kde-apod).
+This is the Omarchy version of [kde-apod](https://github.com/smolamSK/kde-apod). For a Mac, see [macos-apod](https://github.com/smolamSK/macos-apod).
 
 ## Features
 
